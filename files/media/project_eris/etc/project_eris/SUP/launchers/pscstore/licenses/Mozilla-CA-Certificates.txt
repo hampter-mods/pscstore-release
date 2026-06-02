@@ -1,0 +1,14 @@
+curl CA Extract / Mozilla CA Bundle Notice
+==========================================
+
+PSC Store includes a curl-compatible CA certificate bundle at:
+
+/media/project_eris/etc/project_eris/SUP/keys/cacert.pem
+
+That file is generated from Mozilla's root certificate data using curl's
+mk-ca-bundle tooling. The bundle itself contains its own generation header,
+including the source date, Mozilla certdata reference, mk-ca-bundle version,
+and SHA256.
+
+Reference:
+https://curl.se/docs/caextract.html

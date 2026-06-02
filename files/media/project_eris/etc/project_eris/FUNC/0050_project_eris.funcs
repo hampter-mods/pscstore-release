@@ -1,0 +1,982 @@
+#!/bin/sh
+#
+#  Copyright 2020 ModMyClassic (https://modmyclassic.com/license)
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+###############################################################################
+# Project Eris Function Library
+# ModMyClassic.com / https://discordapp.com/invite/8gygsrw
+###############################################################################
+
+###############################################################################
+### LOCAL FUNCTIONS ###########################################################
+###############################################################################
+kill_ui_programs(){
+  killall -s TERM "sdl_display" &> "/dev/null"
+  killall -s KILL "showLogo" "sonyapp" "ui_menu" "auto_dimmer" "pcsx" &> "/dev/null"
+}
+
+# Cleanup stale memcard symlinks that target volatile datatmp aliases.
+# These can be recreated by Stock UI/PCSX while sPcsxDataOriginPath points to /var/volatile/datatmp/.
+cleanup_volatile_memcard_symlinks(){
+  local cleaned=0
+  local failed=0
+  local SLOT=""
+  local CARD=""
+  local TARGET=""
+  local BAK=""
+
+  for SLOT in /data/AppData/sony/pcsx/[0-9]*; do
+    [ -d "${SLOT}/.pcsx/memcards" ] || continue
+    for CARD in "${SLOT}/.pcsx/memcards"/card*.mcd; do
+      [ -L "${CARD}" ] || continue
+      TARGET="$(readlink "${CARD}" 2>/dev/null)"
+      case "${TARGET}" in
+        /var/volatile/datatmp/*)
+          # If target currently exists, this is an active alias while Stock UI is running.
+          # Leave it in place and let slot shadow sync handle persistence on exit.
+          if [ -e "${CARD}" ]; then
+            continue
+          else
+            # Broken/stale alias: remove and restore from .bak when available.
+            BAK="${CARD%.mcd}.bak"
+            if rm -f "${CARD}" 2>/dev/null; then
+              if [ -f "${BAK}" ]; then
+                cp -f "${BAK}" "${CARD}" 2>/dev/null || true
+              fi
+              cleaned=$((cleaned + 1))
+            else
+              failed=$((failed + 1))
+              echo "[PROJECT ERIS](WARN) failed to remove stale memcard symlink: ${CARD} -> ${TARGET}"
+            fi
+          fi
+          ;;
+      esac
+    done
+  done
+
+  if [ "${cleaned}" -gt 0 ] || [ "${failed}" -gt 0 ]; then
+    echo "[PROJECT ERIS](INFO) memcard symlink cleanup: cleaned=${cleaned} failed=${failed}"
+  fi
+}
+
+# Create a shadow copy for internal slot data so UI/PCSX aliases under datatmp
+# never point back to the same /data slot path (prevents recursive memcard links).
+prepare_internal_slot_shadow(){
+  local SRC_ID="${1}"
+  local DST_ID="${2}"
+  local SRC="/data/AppData/sony/pcsx/${SRC_ID}"
+  local DST="${VOL_DATAPCSX}/${DST_ID}"
+  local NAME=""
+  local SRC_CARD=""
+  local DST_CARD=""
+  local TARGET=""
+  local TMP=""
+  local BAK=""
+
+  [ -n "${SRC_ID}" ] && [ -n "${DST_ID}" ] || return 1
+  [ -d "${SRC}" ] || return 1
+
+  rm -rf "${DST}" 2>/dev/null
+  mkdir -p "${DST}" || return 1
+
+  # Copy slot payload into a detached shadow directory for this UI session.
+  cp -af "${SRC}/." "${DST}/" 2>/dev/null || true
+  mkdir -p "${DST}/.pcsx/memcards" 2>/dev/null || true
+
+  # Seed shadow memcards from the real /data slot and force regular files.
+  for NAME in card1.mcd card2.mcd; do
+    SRC_CARD="${SRC}/.pcsx/memcards/${NAME}"
+    DST_CARD="${DST}/.pcsx/memcards/${NAME}"
+    BAK="${SRC}/.pcsx/memcards/${NAME%.mcd}.bak"
+
+    if [ -f "${SRC_CARD}" ] && [ ! -L "${SRC_CARD}" ]; then
+      cp -f "${SRC_CARD}" "${DST_CARD}" 2>/dev/null || true
+    elif [ -L "${SRC_CARD}" ]; then
+      TMP="${DST_CARD}.seed.$$"
+      if cp -f "${SRC_CARD}" "${TMP}" 2>/dev/null && rm -f "${DST_CARD}" && mv "${TMP}" "${DST_CARD}"; then
+        :
+      else
+        rm -f "${TMP}" 2>/dev/null
+      fi
+    fi
+
+    if [ ! -e "${DST_CARD}" ] && [ -f "${BAK}" ]; then
+      cp -f "${BAK}" "${DST_CARD}" 2>/dev/null || true
+    fi
+
+    # If copy preserved a volatile symlink, materialize it now.
+    if [ -L "${DST_CARD}" ]; then
+      TARGET="$(readlink "${DST_CARD}" 2>/dev/null)"
+      case "${TARGET}" in
+        /var/volatile/datatmp/*/.pcsx/memcards/*.mcd)
+          TMP="${DST_CARD}.mat.$$"
+          if cp -f "${DST_CARD}" "${TMP}" 2>/dev/null && rm -f "${DST_CARD}" && mv "${TMP}" "${DST_CARD}"; then
+            :
+          else
+            rm -f "${TMP}" 2>/dev/null
+            rm -f "${DST_CARD}" 2>/dev/null
+            [ -f "${BAK}" ] && cp -f "${BAK}" "${DST_CARD}" 2>/dev/null || true
+          fi
+          ;;
+      esac
+    fi
+  done
+
+  echo "${SRC_ID}" > "${DST}/.psc_internal_slot_source"
+  return 0
+}
+
+# Persist internal shadow slot writes back into the real /data slot dirs.
+sync_internal_slot_shadows(){
+  local SHADOW=""
+  local SRC_ID=""
+  local DST=""
+  local MEMDIR=""
+  local CARD=""
+  local NAME=""
+  local DST_CARD=""
+  local TARGET=""
+  local TMP=""
+  local BAK=""
+  local DST_MEM_BAK=""
+
+  [ -d "${VOL_DATAPCSX}" ] || return 0
+  for SHADOW in "${VOL_DATAPCSX}"/*; do
+    [ -d "${SHADOW}" ] || continue
+    [ -f "${SHADOW}/.psc_internal_slot_source" ] || continue
+    SRC_ID="$(cat "${SHADOW}/.psc_internal_slot_source" 2>/dev/null)"
+    case "${SRC_ID}" in
+      ''|*[!0-9]*) continue ;;
+    esac
+
+    # UI/PCSX can rewrite memcards as volatile aliases under datatmp (including
+    # self-referential links). Materialize those to real files before syncing back.
+    MEMDIR="${SHADOW}/.pcsx/memcards"
+    if [ -d "${MEMDIR}" ]; then
+      for CARD in "${MEMDIR}"/card*.mcd; do
+        [ -L "${CARD}" ] || continue
+        TARGET="$(readlink "${CARD}" 2>/dev/null)"
+        case "${TARGET}" in
+          /var/volatile/datatmp/*/.pcsx/memcards/*.mcd)
+            TMP="${CARD}.pscfix.$$"
+            if cp -f "${CARD}" "${TMP}" 2>/dev/null && rm -f "${CARD}" && mv "${TMP}" "${CARD}"; then
+              :
+            else
+              rm -f "${TMP}" 2>/dev/null
+              rm -f "${CARD}" 2>/dev/null
+              BAK="${CARD%.mcd}.bak"
+              [ -f "${BAK}" ] && cp -f "${BAK}" "${CARD}" 2>/dev/null || true
+            fi
+            ;;
+        esac
+      done
+    fi
+
+    DST="/data/AppData/sony/pcsx/${SRC_ID}"
+    mkdir -p "${DST}/.pcsx/memcards" || continue
+    # Preserve current destination cards in case shadow cards are unresolved links.
+    DST_MEM_BAK="/tmp/psc_memsync_${SRC_ID}_$$"
+    rm -rf "${DST_MEM_BAK}" 2>/dev/null
+    mkdir -p "${DST_MEM_BAK}" 2>/dev/null || true
+    [ -d "${DST}/.pcsx/memcards" ] && cp -af "${DST}/.pcsx/memcards/." "${DST_MEM_BAK}/" 2>/dev/null || true
+
+    # Merge shadow metadata back; keep destination structure instead of deleting it.
+    [ -d "${SHADOW}/.pcsx" ] && cp -af "${SHADOW}/.pcsx/." "${DST}/.pcsx/" 2>/dev/null || true
+    [ -f "${SHADOW}/pcsx.cfg" ] && cp -af "${SHADOW}/pcsx.cfg" "${DST}/pcsx.cfg" 2>/dev/null || true
+
+    # Ensure destination memcards are regular files; restore preserved cards if needed.
+    for NAME in card1.mcd card2.mcd; do
+      DST_CARD="${DST}/.pcsx/memcards/${NAME}"
+      if [ -L "${DST_CARD}" ]; then
+        TARGET="$(readlink "${DST_CARD}" 2>/dev/null)"
+        case "${TARGET}" in
+          /var/volatile/datatmp/*/.pcsx/memcards/*.mcd)
+            TMP="${DST_CARD}.pscfix.$$"
+            if cp -f "${DST_CARD}" "${TMP}" 2>/dev/null && rm -f "${DST_CARD}" && mv "${TMP}" "${DST_CARD}"; then
+              :
+            else
+              rm -f "${TMP}" 2>/dev/null
+              rm -f "${DST_CARD}" 2>/dev/null
+              [ -f "${DST_MEM_BAK}/${NAME}" ] && cp -f "${DST_MEM_BAK}/${NAME}" "${DST_CARD}" 2>/dev/null || true
+            fi
+            ;;
+        esac
+      fi
+
+      if [ ! -e "${DST_CARD}" ] && [ -f "${DST_MEM_BAK}/${NAME}" ]; then
+        cp -f "${DST_MEM_BAK}/${NAME}" "${DST_CARD}" 2>/dev/null || true
+      fi
+    done
+    rm -rf "${DST_MEM_BAK}" 2>/dev/null
+  done
+}
+
+# Ensure internal shadow memcards are regular files and seeded from real /data slots.
+refresh_internal_shadow_memcards(){
+  local SHADOW=""
+  local SRC_ID=""
+  local MEMDIR=""
+  local NAME=""
+  local SRC_CARD=""
+  local DST_CARD=""
+  local BAK=""
+  local TARGET=""
+  local TMP=""
+  local NEED_FIX=0
+
+  [ -d "${VOL_DATAPCSX}" ] || return 0
+  for SHADOW in "${VOL_DATAPCSX}"/*; do
+    [ -d "${SHADOW}" ] || continue
+    [ -f "${SHADOW}/.psc_internal_slot_source" ] || continue
+    SRC_ID="$(cat "${SHADOW}/.psc_internal_slot_source" 2>/dev/null)"
+    case "${SRC_ID}" in
+      ''|*[!0-9]*) continue ;;
+    esac
+
+    MEMDIR="${SHADOW}/.pcsx/memcards"
+    mkdir -p "${MEMDIR}" 2>/dev/null || true
+    for NAME in card1.mcd card2.mcd; do
+      SRC_CARD="/data/AppData/sony/pcsx/${SRC_ID}/.pcsx/memcards/${NAME}"
+      DST_CARD="${MEMDIR}/${NAME}"
+      BAK="/data/AppData/sony/pcsx/${SRC_ID}/.pcsx/memcards/${NAME%.mcd}.bak"
+      NEED_FIX=0
+
+      if [ -L "${DST_CARD}" ]; then
+        TARGET="$(readlink "${DST_CARD}" 2>/dev/null)"
+        case "${TARGET}" in
+          "${DST_CARD}"|/var/volatile/datatmp/*/.pcsx/memcards/*.mcd) NEED_FIX=1 ;;
+        esac
+      elif [ ! -e "${DST_CARD}" ]; then
+        NEED_FIX=1
+      fi
+
+      [ "${NEED_FIX}" = "1" ] || continue
+      rm -f "${DST_CARD}" 2>/dev/null
+      if [ -f "${SRC_CARD}" ] && [ ! -L "${SRC_CARD}" ]; then
+        cp -f "${SRC_CARD}" "${DST_CARD}" 2>/dev/null || true
+      elif [ -L "${SRC_CARD}" ]; then
+        TMP="${DST_CARD}.seed.$$"
+        if cp -f "${SRC_CARD}" "${TMP}" 2>/dev/null && mv -f "${TMP}" "${DST_CARD}" 2>/dev/null; then
+          :
+        else
+          rm -f "${TMP}" 2>/dev/null
+        fi
+      fi
+      [ ! -e "${DST_CARD}" ] && [ -f "${BAK}" ] && cp -f "${BAK}" "${DST_CARD}" 2>/dev/null || true
+
+      if [ -L "${DST_CARD}" ]; then
+        TARGET="$(readlink "${DST_CARD}" 2>/dev/null)"
+        case "${TARGET}" in
+          "${DST_CARD}"|/var/volatile/datatmp/*/.pcsx/memcards/*.mcd)
+            TMP="${DST_CARD}.mat.$$"
+            if cp -f "${DST_CARD}" "${TMP}" 2>/dev/null && rm -f "${DST_CARD}" && mv "${TMP}" "${DST_CARD}" 2>/dev/null; then
+              :
+            else
+              rm -f "${TMP}" 2>/dev/null
+              rm -f "${DST_CARD}" 2>/dev/null
+              [ -f "${SRC_CARD}" ] && [ ! -L "${SRC_CARD}" ] && cp -f "${SRC_CARD}" "${DST_CARD}" 2>/dev/null || true
+              [ ! -e "${DST_CARD}" ] && [ -f "${BAK}" ] && cp -f "${BAK}" "${DST_CARD}" 2>/dev/null || true
+            fi
+            ;;
+        esac
+      fi
+    done
+  done
+}
+
+start_internal_shadow_memcard_guard(){
+  [ -f "/tmp/pe_shadow_memcard_guard.pid" ] && stop_internal_shadow_memcard_guard
+  (
+    local SEEN_UI=0
+    while true; do
+      if ps | grep -q "[u]i_menu"; then
+        SEEN_UI=1
+        refresh_internal_shadow_memcards
+      elif [ "${SEEN_UI}" = "1" ]; then
+        break
+      fi
+      sleep 1
+    done
+  ) &
+  echo $! > "/tmp/pe_shadow_memcard_guard.pid"
+}
+
+stop_internal_shadow_memcard_guard(){
+  local GUARD_PID=""
+  if [ -f "/tmp/pe_shadow_memcard_guard.pid" ]; then
+    GUARD_PID="$(cat "/tmp/pe_shadow_memcard_guard.pid" 2>/dev/null)"
+    case "${GUARD_PID}" in
+      ''|*[!0-9]*) ;;
+      *) kill "${GUARD_PID}" 2>/dev/null || true ;;
+    esac
+    rm -f "/tmp/pe_shadow_memcard_guard.pid"
+  fi
+}
+
+launch_retroarch(){
+  echo "[PROJECT ERIS](INFO) launching retroarch"
+  if [ -f "${PROJECT_ERIS_PATH}/opt/retroarch/retroarch" ]; then
+    # Cleanup 
+    cd "/home/root"
+    kill_ui_programs
+    rm -f "/tmp/launchfilecommand"
+    rm -f "${RUNTIME_LOG_PATH}/retroarch.log"
+    # Disable Power button
+    echo 2 > "/data/power/disable"
+    # Set up RetroArch and launch 
+    if [ ! -f "${PROJECT_ERIS_PATH}/opt/retroarch/system/scph102b.bin" ]; then
+      mkdir -p "${PROJECT_ERIS_PATH}/opt/retroarch/system"
+      cp -f "/gaadata/system/bios/romw.bin" "${PROJECT_ERIS_PATH}/opt/retroarch/system/scph102b.bin"
+      echo "[PROJECT ERIS](INFO) copied romw.bin to scph102b.bin for RA PCSX"
+    fi
+    mkdir -p "/tmp/ra_cache"
+    CUSTOM_THEME_PATH="${PROJECT_ERIS_PATH}/opt/retroarch/config/retroarch/assets/xmb/custom"
+    OZONE_THEME_PATH="${PROJECT_ERIS_PATH}/opt/retroarch/config/retroarch/assets/ozone"
+    rm -f "${CUSTOM_THEME_PATH}/font.tff"
+    [ ! -f "${CUSTOM_THEME_PATH}/font.ttf" ] && cp -f "/usr/sony/share/data/font/SSTJapanese-Regular.ttf" "${CUSTOM_THEME_PATH}/font.ttf"
+    [ ! -f "${OZONE_THEME_PATH}/regular.ttf" ] && cp -f "/usr/sony/share/data/font/SSTJapanese-Regular.ttf" "${OZONE_THEME_PATH}/regular.ttf"
+    [ ! -f "${OZONE_THEME_PATH}/bold.ttf" ] && cp -f "/usr/sony/share/data/font/SSTJapanese-Bold.ttf" "${OZONE_THEME_PATH}/bold.ttf"
+    [ ! -f "${CUSTOM_THEME_PATH}/png/bg.png" ] && cp -f "/usr/sony/share/data/images/GR/JP_US_BG.png" "${CUSTOM_THEME_PATH}/png/bg.png"
+    chmod +x "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/ra_launch.sh"
+    # Run RetroArch
+    "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/ra_launch.sh" -v
+    # Post RetroArch run cleanup 
+    rm -rf "/tmp/ra_cache"
+    cd "/home/root"
+    sync
+    if [ "${1}" = "--from_ui" ]; then
+      echo "launch_stockui" > "/tmp/launchfilecommand"
+    elif [ "${1}" = "--from_ab" ]; then
+      echo "sh /media/Autobleem/start.sh" > "/tmp/launchfilecommand"
+    else
+      echo "launch_bootmenu" > "/tmp/launchfilecommand"
+      
+    fi
+  else
+    # FAIL catch
+    display_crash_message "Retroarch not installed. Opening Stock ui." &
+    sleep 5
+    echo "[PROJECT ERIS](FAIL) tried to launch retroarch and it's not installed! Opening Stock ui..."
+    killall -s KILL "sdl_display" &> "/dev/null"
+    echo launch_stockui > "/tmp/launchfilecommand"
+  fi
+}
+
+launch_retroarch_standalone(){
+  launch_retroarch --from_ui
+}
+
+launch_retroarch_standalone_AB(){
+  launch_retroarch --from_ab
+}
+
+launch_launcher_command(){
+  echo "[PROJECT ERIS](INFO) launching command from launch.sh"
+  if [ -f "/var/volatile/launchtmp/launch.sh" ]; then
+    chmod +x "/var/volatile/launchtmp/launch.sh"
+    kill_ui_programs
+    "/var/volatile/launchtmp/launch.sh"
+    echo "[PROJECT ERIS](INFO) launch.sh has exited with $?"
+  else
+    echo "[PROJECT ERIS](ERROR) launch.sh is missing"
+    #echo "[PROJECT ERIS](DEBUG) launchtmp path: readlink -fn /var/volatile/launchtmp/"
+  fi
+  rm -f "/var/volatile/launchtmp"
+  if [ ! -f "/tmp/launchfilecommand" ]; then
+    # If no further launchfilecommand has been set then return to StockUI
+    echo launch_stockui > "/tmp/launchfilecommand"
+  fi
+}
+
+launch_bootmenu(){
+  echo "[PROJECT ERIS](INFO) launching BootMenu"
+  cd "/home/root"
+  kill_ui_programs
+  rm -f "/tmp/launchfilecommand"
+  rm -fr "${PROJECT_ERIS_PATH}/opt/project_eris_ui/temp"
+  # Disable Power button
+  echo 2 > "/data/power/disable"
+  local AUTOBOOT="--auto-boot"
+  [ -f "/var/volatile/bm_booted.flag" ] && AUTOBOOT="" || touch "/var/volatile/bm_booted.flag"
+  # Run BootMenu
+  if [ "${BOOT_MENU_MUSIC}" = "1" ]; then
+    SDL_VIDEODRIVER=wayland ${PROJECT_ERIS_PATH}/bin/boot_menu --image-folder "${IMAGES_PATH}" --music-folder "${SOUNDS_PATH}/" --theme-folder "${THEMES_PATH}/${SELECTED_THEME}/menu_files" \
+                                       --default-cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg_DEFAULT.INI" --cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg.INI" \
+                                       --ui-themes-folder "${THEMES_PATH}" --boot-menu-folder "${PROJECT_ERIS_PATH}/etc/boot_menu" "${AUTOBOOT}" >> "${MOUNTPOINT}/logs/boot_menu.log" 2>&1
+  else
+    SDL_VIDEODRIVER=wayland ${PROJECT_ERIS_PATH}/bin/boot_menu --image-folder "${IMAGES_PATH}" --theme-folder "${THEMES_PATH}/${SELECTED_THEME}/menu_files" --default-cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg_DEFAULT.INI" \
+                                       --cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg.INI" --ui-themes-folder "${THEMES_PATH}" \
+                                       --boot-menu-folder "${PROJECT_ERIS_PATH}/etc/boot_menu" "${AUTOBOOT}" >> "${MOUNTPOINT}/logs/boot_menu.log" 2>&1
+  fi
+  STATUS=$?
+  if [ ${STATUS} -ne 0 ]; then
+    echo "[PROJECT ERIS](ERROR) It appears boot menu failed to load correctly! Restarting Weston and trying once more..." 
+    systemctl restart weston
+    wait_sdl
+    if [ "${BOOT_MENU_MUSIC}" = "1" ]; then
+      SDL_VIDEODRIVER=wayland ${PROJECT_ERIS_PATH}/bin/boot_menu --image-folder "${IMAGES_PATH}" --music-folder "${SOUNDS_PATH}/" --theme-folder "${THEMES_PATH}/${SELECTED_THEME}/menu_files" \
+                                        --default-cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg_DEFAULT.INI" --cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg.INI" \
+                                        --ui-themes-folder "${THEMES_PATH}" --boot-menu-folder "${PROJECT_ERIS_PATH}/etc/boot_menu" "${AUTOBOOT}" >> "${MOUNTPOINT}/logs/boot_menu.log" 2>&1
+    else
+      SDL_VIDEODRIVER=wayland ${PROJECT_ERIS_PATH}/bin/boot_menu --image-folder "${IMAGES_PATH}" --theme-folder "${THEMES_PATH}/${SELECTED_THEME}/menu_files" --default-cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg_DEFAULT.INI" \
+                                        --cfg-file "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg.INI" --ui-themes-folder "${THEMES_PATH}" \
+                                        --boot-menu-folder "${PROJECT_ERIS_PATH}/etc/boot_menu" "${AUTOBOOT}" >> "${MOUNTPOINT}/logs/boot_menu.log" 2>&1
+    fi
+  fi
+}
+
+launch_stockui(){
+  echo "[PROJECT ERIS](INFO) launching stock ui"
+  # Cleanup
+  cd "/home/root"
+  kill_ui_programs
+  # Pre-clean any stale links left from previous runs.
+  cleanup_volatile_memcard_symlinks
+  rm -f "/tmp/launchfilecommand"
+  # Setup Stock UI with custom
+  setupstockui
+  # Re-seed any internal shadow memcards before UI starts, then keep them healthy while UI runs.
+  refresh_internal_shadow_memcards
+  start_internal_shadow_memcard_guard
+  # Restart Weston to prevent crash due to SONY's shit code.
+  if [ -f "/tmp/weston_need_restart.flag" ]; then
+    rm -f "/tmp/weston_need_restart.flag"
+  fi
+  # Remove power file flags
+  rm -f "/data/power/prepare_suspend" "/data/power/apps_okay"
+  # Fix for last selected game issue. If not in place user may experience ui issue
+  sed -i "s/iUiUserSettingLastSelectGameCursorPos=.*/iUiUserSettingLastSelectGameCursorPos=0/" "/data/AppData/sony/ui/user.pre"
+  # Get ready to run Stock UI
+  cd "/data/AppData/sony/pcsx"
+  export PCSX_ESC_KEY=2
+  # Indicate we have done the first boot
+  touch "/var/volatile/booted.flag"
+  # Run Stock UI
+  LD_PRELOAD="${PROJECT_ERIS_PATH}/lib/sdl_remap_arm.so" "/usr/sony/bin/ui_menu" --power-off-enable &> "${RUNTIME_LOG_PATH}/ui_menu.log"
+  # Post Stock UI run cleanup
+  stop_internal_shadow_memcard_guard
+  refresh_internal_shadow_memcards
+  rm -f "/data/power/prepare_suspend"
+  sed -i "s/iUiUserSettingLastSelectGameCursorPos=.*/iUiUserSettingLastSelectGameCursorPos=0/" "/data/AppData/sony/ui/user.pre"
+  # Persist internal shadow slot writes back into real /data slots.
+  sync_internal_slot_shadows
+  # While datatmp aliases still exist, remove only broken/stale volatile links.
+  cleanup_volatile_memcard_symlinks
+  umount "/usr/sony/bin/pcsx"
+  umount "/gaadata/databases/regional.db"
+  umount "/usr/sony/share/data/preferences/system.pre"
+  rm -rf "${VOL_GAADATA}" "${VOL_DATAPCSX}"
+  # Final pass removes any broken links if alias materialization failed.
+  cleanup_volatile_memcard_symlinks
+}
+
+###############################################################################
+### SUB LOCAL FUNCTIONS #######################################################
+###############################################################################
+initial_setup() { 
+  START=$(date +%s%N)
+  sdl_text "Parsing configurations..."
+  if [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg.INI" ] || [ -f "${PROJECT_ERIS_PATH}/flags/UPDATE_CONFIG" ]; then
+    echo "[PROJECT ERIS](INFO) Injecting default Project Eris config..."
+    cat "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg_DEFAULT.INI" > "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/project_eris_cfg.INI"
+    rm -f "${PROJECT_ERIS_PATH}/flags/UPDATE_CONFIG"
+  fi
+  if [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/boot_sequence.cfg" ] || [ -f "${PROJECT_ERIS_PATH}/flags/UPDATE_BOOT" ]; then
+    echo "[PROJECT ERIS](INFO) Injecting default boot sequence..."
+    cat "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/boot_sequence_DEFAULT.cfg" > "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/boot_sequence.cfg"
+    rm -f "${PROJECT_ERIS_PATH}/flags/UPDATE_BOOT"
+  fi
+  if [ ! -f "${PROJECT_ERIS_PATH}/opt/retroarch/config/retroarch/retroarch.cfg" ] || [ -f "${PROJECT_ERIS_PATH}/flags/UPDATE_RA_CONFIG" ]; then
+    echo "[PROJECT ERIS](INFO) Injecting default retroarch config..."
+    cat "${PROJECT_ERIS_PATH}/opt/retroarch/config/retroarch/retroarch_DEFAULT.cfg" > "${PROJECT_ERIS_PATH}/opt/retroarch/config/retroarch/retroarch.cfg"
+    rm -f "${PROJECT_ERIS_PATH}/flags/UPDATE_RA_CONFIG"
+  fi
+  [ ! -f "${PROJECT_ERIS_PATH}/opt/retroarch/config/retroarch/retroarch-core-options.cfg" ] && touch "${PROJECT_ERIS_PATH}/opt/retroarch/config/retroarch/retroarch-core-options.cfg"
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Project Eris initial set up took: $(((END-START)/1000000))ms to execute" 
+}
+
+setupstockui() {
+  START=$(date +%s%N)
+  #Patch out health check if toggled.
+  if [ -f "/var/volatile/booted.flag" ] || [ "${BOOT_DISABLE_HEALTH}" = "1" ]; then
+    PATCH_DIR="/var/volatile/health_patch"
+    PATCH_TARGET="/usr/sony/bin/ui_menu"
+    PATCH_WORKING="${PATCH_DIR}/ui_menu"
+    if [ ! -f "${PATCH_WORKING}" ]; then
+      START=$(date +%s%N)
+      echo "[PROJECT ERIS](INFO) attempting to patch out H+S statement"
+      # Perform patching
+      mkdir -p "${PATCH_DIR}"
+      cp "${PATCH_TARGET}" "${PATCH_WORKING}"
+      echo -ne '\xb8\x0c\x00' | dd bs=1 of="${PATCH_WORKING}" seek=28084 conv=notrunc
+      echo -ne '\x06\x03' | dd bs=1 of="${PATCH_WORKING}" seek=28120 conv=notrunc
+      echo -ne '\x58\xbe' | dd bs=1 of="${PATCH_WORKING}" seek=28712 conv=notrunc
+      mount -o bind "${PATCH_WORKING}" "${PATCH_TARGET}"
+      if [ "$?" -eq "0" ]; then
+        echo "[PROJECT ERIS](INFO) patched out H+S statement"
+      else
+        echo "[PROJECT ERIS](FAIL) failed to patch out H+S statement, continuing anyway..."
+      fi
+      END=$(date +%s%N)
+      echo "[PROJECT ERIS](PROFILE) Project Eris H+S patching took: $(((END-START)/1000000))ms to execute"
+    fi
+  fi
+  # Unmount partitons and create tmpfs - Shut system down on failure
+  MOUNT_FAIL=0
+  # Create gaadata and data folders in tmp then mount over original folders
+  export VOL_GAADATA="/var/volatile/gaadatatmp"
+  export VOL_DATAPCSX="/var/volatile/datatmp"
+  mkdir -p "${VOL_GAADATA}" "${VOL_DATAPCSX}"
+  mount -o bind "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/binaries/pcsx" "/usr/sony/bin/pcsx" || MOUNT_FAIL=1
+  if [ "${MOUNT_FAIL}" = "1" ]; then
+    # FAIL catch
+    echo 0 > "/sys/class/leds/green/brightness"
+    echo 1 > "/sys/class/leds/red/brightness"
+    display_crash_message "PCSX binary missing." &
+    sleep 1
+    sync
+    reboot
+    exit 1
+  fi
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Project Eris tmpfs mounting took: $(((END-START)/1000000))ms to execute"
+  #-----------------------------------------------------------------------------#
+  START=$(date +%s%N)
+  # Create gaadata on tmpfs
+  mkdir -p "${VOL_GAADATA}/databases/"
+  cp -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" "${VOL_GAADATA}/databases/"
+  ln -s "/gaadata/geninfo" "${VOL_GAADATA}"
+  ln -s "/gaadata/preferences" "${VOL_GAADATA}"
+  ln -s "/gaadata/system" "${VOL_GAADATA}"
+  # Create data on tmpfs
+  ln -s "/gaadata/system/bios" "${VOL_DATAPCSX}"
+  ln -s "/usr/sony/bin/plugins" "${VOL_DATAPCSX}"
+  # Handle Folder Selection
+  if [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/selected_folder" ]; then
+    SELECTED_FOLDER=$(cat "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/selected_folder")
+    [ ! -z "${SELECTED_FOLDER}" ] && ${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd "PRAGMA foreign_keys = ON; DELETE FROM MENU_ENTRIES WHERE GAME_ID NOT IN (SELECT GAME_ID FROM FOLDER_ITEMS WHERE FOLDER_ID = ${SELECTED_FOLDER});" ".quit"
+  fi
+  # Link games on /MOUNTPOINT
+  if [ -d "${MOUNTPOINT}/games" ]; then
+    MEDIA_GAME_IDS=($(${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd "SELECT GAME_ID FROM MENU_ENTRIES" ".quit"))
+    for GAME in "${MEDIA_GAME_IDS[@]}"; do
+      ln -s "${MOUNTPOINT}/games/${GAME}/" "${VOL_GAADATA}"
+      ln -s "${MOUNTPOINT}/games/${GAME}/" "${VOL_DATAPCSX}"
+      # Ensure .pcsx/pcsx.cfg is present
+      mkdir -p "${MOUNTPOINT}/games/${GAME}/.pcsx"
+      [ ! -f "${MOUNTPOINT}/games/${GAME}/.pcsx/pcsx.cfg" ] && cp "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/defaults/pcsx.cfg" "${MOUNTPOINT}/games/${GAME}/.pcsx/pcsx.cfg"
+    done
+  fi
+  # Force intercept to allow launching custom scripts from stock UI
+  mount -o bind "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/system.pre" "/usr/sony/share/data/preferences/system.pre"
+  cp "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/intercept" "/tmp/intercept"
+  chmod +x "/tmp/intercept"
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Project Eris tmpfs sym linking and processing took: $(((END-START)/1000000))ms to execute"
+  #-----------------------------------------------------------------------------#
+  # Unite EMMC and MEDIA games and databases
+  if [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/selected_folder" ]; then
+    START=$(date +%s%N)
+    EMMC_GAME_IDS=($(${PROJECT_ERIS_PATH}/bin/sqlite3 "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/stockRegional.db" -cmd "SELECT GAME_ID FROM FOLDER_ITEMS WHERE FOLDER_ID = ${SELECTED_FOLDER}" ".quit"))
+    if [ ! -z "${EMMC_GAME_IDS}" ]; then
+      MEDIA_GAADATA_COUNT=$(${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd "SELECT GAME_ID FROM MENU_ENTRIES ORDER BY GAME_ID DESC LIMIT 1" ".quit")
+      [ -z "${MEDIA_GAADATA_COUNT}" ] && MEDIA_GAADATA_COUNT=0
+      echo "[PROJECT ERIS](INFO) EMMC Count ${#EMMC_GAME_IDS[@]} Media Count ${MEDIA_GAADATA_COUNT}"
+      # Merge databases
+      echo "BEGIN TRANSACTION;" > "/tmp/join.sql"
+      ${PROJECT_ERIS_PATH}/bin/sqlite3 "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/stockRegional.db" -cmd ".output /tmp/emmc_games.sql" \
+        ".mode insert MENU_ENTRIES" "select GAME_ID + ${MEDIA_GAADATA_COUNT}, GAME_TITLE_STRING, PUBLISHER_NAME, RELEASE_YEAR, PLAYERS, RATING_IMAGE, GAME_MANUAL_QR_IMAGE, case when LINK_GAME_ID is null or trim(cast(LINK_GAME_ID as text)) = '' or cast(LINK_GAME_ID as integer) <= 0 then GAME_ID + ${MEDIA_GAADATA_COUNT} else cast(LINK_GAME_ID as integer) + ${MEDIA_GAADATA_COUNT} end, 9999 from GAME WHERE GAME_ID IN (SELECT GAME_ID FROM FOLDER_ITEMS WHERE FOLDER_ID = ${SELECTED_FOLDER});" \
+        ".mode insert DISC" "select null, GAME_ID + ${MEDIA_GAADATA_COUNT}, DISC_NUMBER, BASENAME from DISC WHERE GAME_ID IN (SELECT GAME_ID FROM FOLDER_ITEMS WHERE FOLDER_ID = ${SELECTED_FOLDER});" ".quit"
+      cat "/tmp/emmc_games.sql" >> "/tmp/join.sql"
+      echo "COMMIT;" >> "/tmp/join.sql"
+      ${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd ".read /tmp/join.sql" ".quit"
+      # Link directories
+      for i in "${EMMC_GAME_IDS[@]}"; do
+        if [ -d "/gaadata/${i}" -a -d "/data/AppData/sony/pcsx/${i}" ]; then
+          NEW_ID=$(( MEDIA_GAADATA_COUNT + i ))   
+          ln -s "/gaadata/${i}/" "${VOL_GAADATA}/${NEW_ID}"
+          if ! prepare_internal_slot_shadow "${i}" "${NEW_ID}"; then
+            echo "[PROJECT ERIS](ERROR) Failed to prepare internal slot shadow for ${i} -> ${NEW_ID}"
+          fi
+        fi
+      done 
+    fi
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) Project Eris EMMC + USB dyna link took: $(((END-START)/1000000))ms to execute"
+  elif [ "${LINK_EMMC_AND_USB}" = "1" ]; then
+    START=$(date +%s%N)
+    EMMC_GAADATA_COUNT=$(${PROJECT_ERIS_PATH}/bin/sqlite3 "/gaadata/databases/regional.db" -cmd "SELECT GAME_ID FROM GAME ORDER BY GAME_ID DESC LIMIT 1" ".quit")
+    MEDIA_GAADATA_COUNT=$(${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd "SELECT GAME_ID FROM MENU_ENTRIES ORDER BY GAME_ID DESC LIMIT 1" ".quit")
+    [ -z "${MEDIA_GAADATA_COUNT}" ] && MEDIA_GAADATA_COUNT=0
+    echo "[PROJECT ERIS](INFO) EMMC Count ${EMMC_GAADATA_COUNT} Media Count ${MEDIA_GAADATA_COUNT}"
+    # Merge databases
+    echo "BEGIN TRANSACTION;" > "/tmp/join.sql"
+    ${PROJECT_ERIS_PATH}/bin/sqlite3 "/gaadata/databases/regional.db" -cmd ".output /tmp/emmc_games.sql" \
+      ".mode insert MENU_ENTRIES" "select GAME_ID + ${MEDIA_GAADATA_COUNT}, GAME_TITLE_STRING, PUBLISHER_NAME, RELEASE_YEAR, PLAYERS, RATING_IMAGE, GAME_MANUAL_QR_IMAGE, case when LINK_GAME_ID is null or trim(cast(LINK_GAME_ID as text)) = '' or cast(LINK_GAME_ID as integer) <= 0 then GAME_ID + ${MEDIA_GAADATA_COUNT} else cast(LINK_GAME_ID as integer) + ${MEDIA_GAADATA_COUNT} end, 9999 from GAME;" \
+      ".mode insert DISC" "select null, GAME_ID + ${MEDIA_GAADATA_COUNT}, DISC_NUMBER, BASENAME from DISC;" ".quit"
+    cat "/tmp/emmc_games.sql" >> "/tmp/join.sql"
+    echo "COMMIT;" >> "/tmp/join.sql"
+    ${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd ".read /tmp/join.sql" ".quit"
+    # Link directories
+    for i in $(seq 1 ${EMMC_GAADATA_COUNT}); do
+      if [ -d "/gaadata/${i}" -a -d "/data/AppData/sony/pcsx/${i}" ]; then
+        NEW_ID=$(( MEDIA_GAADATA_COUNT + i ))   
+        [ ! -e "${VOL_GAADATA}/${NEW_ID}" ] && ln -s "/gaadata/${i}/" "${VOL_GAADATA}/${NEW_ID}" || echo "[PROJECT ERIS](ERROR) EMMC Game could not be linked game folder already exists"
+        if ! prepare_internal_slot_shadow "${i}" "${NEW_ID}"; then
+          echo "[PROJECT ERIS](ERROR) Failed to prepare internal slot shadow for ${i} -> ${NEW_ID}"
+        fi
+      fi
+    done 
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) Project Eris EMMC + USB dyna link took: $(((END-START)/1000000))ms to execute"
+  fi
+  if [ "${LINK_ALPHABETICALISE}" = "1" ]; then
+      ${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd "UPDATE MENU_ENTRIES SET POSITION=0" "DROP VIEW GAME" "CREATE VIEW GAME AS SELECT * FROM MENU_ENTRIES ORDER BY POSITION, LOWER(GAME_TITLE_STRING)" ".quit"
+  fi
+  #-----------------------------------------------------------------------------#
+  # If enabled, load any additional additional launchers into the ui_menu database
+  if [ "${UI_APP_LAUNCHERS}" = "1" ]; then
+    START_LAUNCHER=$(date +%s%N)
+    echo "[PROJECT ERIS](INFO) loading additional application launchers"
+    TOTAL_COUNT=$(${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd "SELECT GAME_ID FROM MENU_ENTRIES ORDER BY GAME_ID DESC LIMIT 1" ".quit")
+    [ -z "${TOTAL_COUNT}" ] && TOTAL_COUNT=0
+    LAST_POSITION=$(${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd "SELECT case when POSITION is null then 1 else POSITION + 1 end FROM MENU_ENTRIES ORDER BY POSITION DESC LIMIT 1" ".quit")
+    [ -z "${LAST_POSITION}" ] && LAST_POSITION=1
+	LAST_POSITION2=$(($LAST_POSITION+1))
+	LAST_POSITION3=$(($LAST_POSITION2+1))
+	LAST_POSITION4=$(($LAST_POSITION3+1))
+    echo "BEGIN TRANSACTION;" > "/tmp/launcher.sql"
+	LAUNCHER_FOLDER=-1
+	if [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/launcher_folder" ]; then
+      LAUNCHER_FOLDER=$(cat "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/launcher_folder")
+	fi
+	
+	LAUNCHER_DISPLAY="0"
+	if [[ ! -z "${SELECTED_FOLDER}" && "${LAUNCHER_FOLDER}" -gt -1 ]]; then
+	  if [ "${LAUNCHER_FOLDER}" -eq "${SELECTED_FOLDER}" ]; then
+	    LAUNCHER_DISPLAY="1"
+	  fi
+	else
+	  LAUNCHER_DISPLAY="1"
+	fi
+	
+	HOME_DISPLAY="0"
+	if [ ! -z "${HOME_FOLDER}" ]; then
+	  if [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/home_link" ]; then
+	    if [ "${HOME_FOLDER}" -ne "${SELECTED_FOLDER}" ]; then
+		  HOME_DISPLAY="1"
+		fi
+	  fi
+	fi
+	
+	for LAUNCHER in "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/launchers/"*; do
+	  if [ -d "${LAUNCHER}" ]; then
+		IS_FOLDER_LAUNCHER="0"
+		IS_HOME_LAUNCHER="0"
+		FOLDER_NAME="${LAUNCHER##*/}"
+		if [ "${FOLDER_NAME:0:8}" = "pefolder" ]; then
+		  IS_FOLDER_LAUNCHER="1"
+		elif [ "${FOLDER_NAME}" = "pehome" ]; then
+		  IS_HOME_LAUNCHER="1"
+		fi
+		DISPLAY_ME="0"
+		if [[ "${IS_HOME_LAUNCHER}" = "1"  &&  "${HOME_DISPLAY}" = "1" ]] ; then
+		  DISPLAY_ME="1"
+		elif [[ "${IS_FOLDER_LAUNCHER}" = "1" && "${HOME_DISPLAY}" = "0" ]]; then
+		  if [ "${FOLDER_NAME:8}" -ne "${SELECTED_FOLDER}" ]; then
+		    DISPLAY_ME="1"
+		  fi
+		elif [[ "${IS_FOLDER_LAUNCHER}" = "0" && "${IS_HOME_LAUNCHER}" = "0" && "${LAUNCHER_DISPLAY}" = "1" ]]; then
+		  DISPLAY_ME="1"
+		fi
+		
+		if [ "${DISPLAY_ME}" = "1" ] ; then
+			if [ -f "${LAUNCHER}/launcher.cfg" ]; then
+			  source "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/launcher_reset.cfg"
+			  source "${LAUNCHER}/launcher.cfg"
+			  if [[ -z "${launcher_filename}" || -z "${launcher_title}" ]]; then
+				echo "[PROJECT ERIS](ERROR) launcher.cfg for ${LAUNCHER} is missing required variables launcher_filename and/or launcher_title"
+			  else
+				# Only permit A-Z,1-9 to prevent characters which may break SQL insert
+				launcher_filename=$(echo ${launcher_filename} | sed -e "s/[^ A-Za-z0-9]//g")
+				launcher_title=$(echo $launcher_title | sed -e "s/[^,-_\.' A-Za-z0-9]//g")
+				launcher_title=$(echo $launcher_title | sed -e "s/'/''/g")
+				launcher_publisher=$(echo ${launcher_publisher} | sed -e "s/[^ A-Za-z0-9]//g")
+				launcher_year=$(echo ${launcher_year} | sed -e "s/[^ A-Za-z0-9]//g")
+				if [ "${IS_HOME_LAUNCHER}" = "1" ]; then
+				  launcher_sort="${LAST_POSITION4}"
+				elif [ "${IS_FOLDER_LAUNCHER}" = "1" ]; then
+				  if [ "${launcher_title:0:4}" = "0000" ]; then
+				    launcher_title="${launcher_title:4}"
+				    launcher_sort="${LAST_POSITION2}"
+				  else
+				    launcher_sort="${LAST_POSITION3}"
+				  fi
+				elif [ "${launcher_sort}" = "no" ]; then
+				    launcher_sort="${LAST_POSITION}"
+				else
+				  launcher_sort="0"
+				fi
+				let TOTAL_COUNT++
+				echo "INSERT INTO DISC VALUES(NULL,${TOTAL_COUNT},1,'${launcher_filename}');" >> "/tmp/launcher.sql"
+				echo "INSERT INTO MENU_ENTRIES VALUES(${TOTAL_COUNT},'${launcher_title}','${launcher_publisher}',${launcher_year},1,'CERO_A','QR_CODE_GM',NULL,${launcher_sort});" >> "/tmp/launcher.sql"
+				[ ! -e "${VOL_GAADATA}/${TOTAL_COUNT}" ] && ln -s "${LAUNCHER}" "${VOL_GAADATA}/${TOTAL_COUNT}" || echo "[PROJECT ERIS](ERROR) Launcher could not be linked game folder already exists"
+				[ ! -e "${VOL_DATAPCSX}/${TOTAL_COUNT}" ] && ln -s "${LAUNCHER}" "${VOL_DATAPCSX}/${TOTAL_COUNT}" || echo "[PROJECT ERIS](ERROR) Launcher could not be linked data folder already exists"
+				echo "[PROJECT ERIS](INFO) launcher loaded: ${LAUNCHER}"
+			  fi
+			fi
+		fi
+	  fi
+	done
+    echo "COMMIT;" >> "/tmp/launcher.sql"
+    ${PROJECT_ERIS_PATH}/bin/sqlite3 "${VOL_GAADATA}/databases/regional.db" -cmd ".read /tmp/launcher.sql" ".quit"
+    END_LAUNCHER=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) loading additional application launchers took: $(((END_LAUNCHER-START_LAUNCHER)/1000000))ms to execute"
+  fi
+  #-----------------------------------------------------------------------------#
+  # Clean up temp
+  rm -rf "/tmp/"*".sql" "/tmp/"*".csv"
+  # Overmount the stock DB
+  mount -o bind "${VOL_GAADATA}/databases/regional.db" /gaadata/databases/regional.db
+}
+ 
+###############################################################################
+### MAIN PROJECT ERIS FUNCTION ################################################
+###############################################################################
+execute_project_eris_func(){
+  echo "[PROJECT ERIS](Executing) execute_project_eris_func()"
+  sdl_text "Loading Project Eris..."
+  echo 1 > "/sys/class/leds/red/brightness"
+  OLD_SYSTEM_DIR="${MOUNTPOINT}/system"
+  [ -d "${MOUNTPOINT}/System" ] && OLD_SYSTEM_DIR="${MOUNTPOINT}/System"
+  if [ -d "${OLD_SYSTEM_DIR}" ]; then
+    echo "[PROJECT ERIS](<1.0) Migrating System folder"
+    sdl_text "Migrating old BleemSync deployment..."
+    START=$(date +%s%N)
+    mkdir -p "${PROJECT_ERIS_PATH}/etc/project_eris/SYS"
+    cp -rf "${OLD_SYSTEM_DIR}/"* "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/"
+    rm -r "${OLD_SYSTEM_DIR}"
+    if [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" ]; then
+      ${PROJECT_ERIS_PATH}/bin/sqlite3 "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" < "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/migrate_pre10_db.sql"
+    fi
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](<1.0) Migration complete: $(((END-START)/1000000))ms to execute"
+  fi
+  #-----------------------------------------------------------------------------#
+  START=$(date +%s%N)
+  # COPY is sometimes wrong at the start of folder menu
+  [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/stockRegional.db" ] && cp "/gaadata/databases/regional.db" "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/stockRegional.db"
+  # default folder at start ?
+  if [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/home_folder" ]; then
+    HOME_FOLDER=$(cat "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/home_folder")
+	if [ ! -z "${HOME_FOLDER}" ]; then
+	  echo "${HOME_FOLDER}" > "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/selected_folder"
+    fi
+  fi
+  
+  # Set up package manager
+  [ ! -d "${PROJECT_ERIS_PATH}/dpkg" ] && mkdir -p "${PROJECT_ERIS_PATH}/dpkg/info" && touch "${PROJECT_ERIS_PATH}/dpkg/status"
+  [ ! -d "${PROJECT_ERIS_PATH}/mods" ] && mkdir -p "${PROJECT_ERIS_PATH}/mods"
+  ln -s "${PROJECT_ERIS_PATH}/dpkg" "/var/lib/dpkg"
+  # Copy over default files if not exist
+  mkdir -p "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/defaults"
+  [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/defaults/pcsx.cfg" ] && \
+    cp "/gaadata/1/pcsx.cfg" "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/defaults"
+  [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/CFG/system.pre" ] && \
+    cp "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/system.pre" "${PROJECT_ERIS_PATH}/etc/project_eris/CFG"
+  # Check if this is a new install
+  if [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" ]; then
+    echo "[PROJECT ERIS](INFO) ${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db does NOT EXIST"
+    echo "[PROJECT ERIS](INFO) This may be a new install. Creating databases folder"
+    mkdir -p "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases"
+  fi
+  # Initalise config or update if required
+  initial_setup
+  # Migrate GameData contents and copy default pcsx.cfg if not present
+  for game in "${MOUNTPOINT}/games/"*/; do
+    if [ -d "${game}GameData" ]; then
+      mv "${game}GameData/"* "${game}"
+      cp -rf "${game}GameData/".[!.]* "${game}"
+      rm -r "${game}GameData"
+      rm -f "${game}pcsx.cfg"
+    fi
+  done
+  if [ "${SET_GAADATA_WRITABLE}" != "1" ]; then
+    mount -o remount,ro "/gaadata"
+  fi
+  # Ensure network binaries are executable
+  chmod +x "${PROJECT_ERIS_PATH}/network/usr/sbin"/*
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Project Eris general fixing took: $(((END-START)/1000000))ms to execute"
+  #-----------------------------------------------------------------------------#
+  START=$(date +%s%N)
+  chmod +x "${PROJECT_ERIS_PATH}/bin/mod-install"
+  for f in "${PROJECT_ERIS_PATH}/mods/"*".mod"; do
+    [ -e "${f}" ] || continue
+    sdl_text "Installing mod $(basename ${f})..." 
+    mv -f "${f}" "/tmp/" 
+    ${PROJECT_ERIS_PATH}/bin/mod-install "/tmp/$(basename ${f})" >> "${RUNTIME_LOG_PATH}/mod-install.log"
+    rm -f "/tmp/$(basename ${f})"
+  done
+  sync
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Project Eris mod installs took: $(((END-START)/1000000))ms to execute"
+  # Reload old status page incase we changed it at any point previously.
+  sdl_text "Loading Project Eris..."
+  #-----------------------------------------------------------------------------#
+  START=$(date +%s%N)
+  chmod +x "${PROJECT_ERIS_PATH}/opt/psc_transfer_tools/on_console_transfer.sh"
+  "${PROJECT_ERIS_PATH}/opt/psc_transfer_tools/on_console_transfer.sh"
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Transfer tool execution took: $(((END-START)/1000000))ms to execute"
+  #-----------------------------------------------------------------------------#
+  # RetroArch - create playlist for USB games
+  if [ "${GENERATE_EXTERNAL_GAME_PLAYLIST}" = "1" ]; then
+    START=$(date +%s%N)
+    mkdir -p "${RETROARCH_PATH}/config/retroarch/playlists" "${RETROARCH_PATH}/config/retroarch/thumbnails/PlayStation Classic - External"
+    "${PROJECT_ERIS_PATH}/bin/lpl_generator" "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" "${RETROARCH_PATH}/config/retroarch/playlists/PlayStation Classic - External.lpl" "${MOUNTPOINT}/games" "/tmp/ra_playlist_thumbnails"
+    mount -o bind "/tmp/ra_playlist_thumbnails" "${RETROARCH_PATH}/config/retroarch/thumbnails/PlayStation Classic - External"
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) RA External Playlist Generation execution took: $(((END-START)/1000000))ms to execute"
+  fi
+  # RetroArch - copy appropriate playlist for stock games
+  # TODO - this should be dynamically generated when we support replacing games on the internal
+  if [ "${GENERATE_INTERNAL_GAME_PLAYLIST}" = "1" ]; then
+    START=$(date +%s%N)
+    mkdir -p "${RETROARCH_PATH}/config/retroarch/playlists"
+    if [ "$(cat /gaadata/geninfo/REGION)" = "J" ]; then
+      cp -f "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/retroarch/psc_jpn.lpl" "${RETROARCH_PATH}/config/retroarch/playlists/PlayStation Classic - Internal.lpl"
+    else
+      cp -f "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/retroarch/psc_row.lpl" "${RETROARCH_PATH}/config/retroarch/playlists/PlayStation Classic - Internal.lpl"
+    fi
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) RA Internal Playlist Generation execution took: $(((END-START)/1000000))ms to execute"
+  fi
+  sdl_text "Loading Project Eris..."
+  #-----------------------------------------------------------------------------#
+  # Load additional modules
+  for MOD in "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/modules/"*".ko"; do
+    insmod "${MOD}";
+  done
+  #-----------------------------------------------------------------------------#
+  START=$(date +%s%N)
+  BOOT_COMMAND="launch_stockui"
+  [ "${BOOT_TARGET_STOCK_BM}" = "1" ] && BOOT_COMMAND="launch_bootmenu"
+  [ "${BOOT_TARGET_STOCK_RA}" = "1" ] && BOOT_COMMAND="launch_retroarch"
+  # HDMI connection check, if not connected force BootMenu so Project Eris UI runs
+  # so that if the user has set boot directly to Stock UI or RA, then there is a way
+  # to force Project Eris to run without having to resort to editing config files
+  if [ "$(cat /sys/class/drm/card0-HDMI-A-1/status)" = "disconnected" ]; then
+    BOOT_COMMAND="launch_bootmenu"
+  fi
+  if [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" ]; then
+    echo "[PROJECT ERIS](INFO) UI database does not exist. Waiting for automatic creation during UI startup"
+    sdl_text "UI database doesn't exist. Creating DB..."
+    SECONDS=0
+    DB_TIMEOUT=45
+    while [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" ]
+    do
+      sleep 1s
+      [ "${SECONDS}" -gt "${DB_TIMEOUT}" ] && break
+    done
+    [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" ] && echo "[PROJECT ERIS](INFO) database generated in ${SECONDS} seconds."
+  fi
+  # Check for regional database
+  if [ ! -f "${PROJECT_ERIS_PATH}/etc/project_eris/SYS/databases/regional.db" ]; then
+    echo "[PROJECT ERIS](ERROR) regional database has not been created."
+    #display error message
+    echo 0 > "/sys/class/leds/green/brightness"
+    echo 1 > "/sys/class/leds/red/brightness"
+    display_crash_message "Could not create regional database." &	
+    sleep 5
+    sync
+    reboot
+    exit 1
+  fi
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Project Eris UI startup took: $(((END-START)/1000000))ms to execute"
+  #-----------------------------------------------------------------------------#
+  if [ "${ENABLE_NETWORKING}" = "1" ]; then
+    START=$(date +%s%N)
+    sdl_text "Setting up network..."
+    init_networking &> "${MOUNTPOINT}/logs/network.log"
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) Network Setup execution took: $(((END-START)/1000000))ms to execute"
+  fi
+  if [ "${ENABLE_BLUETOOTH}" = "1" ]; then
+    START=$(date +%s%N)
+    sdl_text "Enabling Bluetooth..."
+    init_bluetooth &> "${MOUNTPOINT}/logs/bluetooth.log"
+    dmesg |grep -i bluetooth >> "${MOUNTPOINT}/logs/bluetooth.log"
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) Network Setup execution took: $(((END-START)/1000000))ms to execute"
+  fi
+  #-----------------------------------------------------------------------------#
+  # Reload and apply udev rules that were overmounted above
+  # Allows both controllers to be detected through a USB hub
+  sdl_text "Mounting files..."
+  mount -o bind "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/20-joystick.rules" "/etc/udev/rules.d/20-joystick.rules"
+  udevadm control --reload-rules
+  udevadm trigger
+  # Mount replacement copyright script
+  chmod +x "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/credits"
+  mount -o bind "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/credits" "/usr/sony/bin/showCopyright.sh"
+  #-----------------------------------------------------------------------------#
+  # Select UI theme whilst load screen available (Profiler built in)
+  sdl_text "Setting up themes..."
+  select_ui_theme
+  #-----------------------------------------------------------------------------#
+  echo 0 > "/sys/class/leds/red/brightness"
+  echo "[PROJECT ERIS](INFO) completed Project Eris boot"
+  sdl_text "Starting up..."
+  #-----------------------------------------------------------------------------#
+  START=$(date +%s%N)
+  # Cleanup before starting main user applications
+  rm -rf "/tmp/systemd"*
+  rm -rf "/tmp/diag/"*
+  killall -s TERM "sdl_display" &> "/dev/null"
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) Project Eris pre run cleanup took: $(((END-START)/1000000))ms to execute"
+  #-----------------------------------------------------------------------------#
+  /media/project_eris/etc/project_eris/SUP/scripts/mute_toggle.sh &
+  while [ "${BOOT_COMMAND}" != "quit" ]; do
+    if [ "${BOOT_COMMAND}" = "launch_stockui" ] || [ "${BOOT_COMMAND}" = "launch_StockUI" ]; then
+      # Restart Weston before launching Stock UI to prevent process hang
+      START_WESTON=$(date +%s%N)
+      systemctl restart weston
+      wait_sdl
+      END_WESTON=$(date +%s%N)
+      echo "[PROJECT ERIS](PROFILE) Weston restart took: $(((END_WESTON-START_WESTON)/1000000))ms to execute"
+    fi
+    [ "${BOOT_COMMAND}" = "launch_StockUI" ] && BOOT_COMMAND="launch_stockui"
+    ${BOOT_COMMAND}
+    [ -f "/tmp/launchfilecommand" ] && BOOT_COMMAND="$(cat /tmp/launchfilecommand)" || BOOT_COMMAND="quit"
+    rm -f "/tmp/launchfilecommand"
+  done
+  umount "/etc/udev/rules.d/20-joystick.rules"
+  if [ "${BOOT_DISABLE_HEALTH}" = "1" ]; then
+    umount "/usr/sony/bin/ui_menu"
+  fi
+  [ "${GENERATE_EXTERNAL_GAME_PLAYLIST}" = "1" ] && umount "${RETROARCH_PATH}/config/retroarch/thumbnails/PlayStation Classic - External"
+  #-----------------------------------------------------------------------------#
+  sync
+  echo "[PROJECT ERIS](Executed) execute_project_eris_func()"
+  kill_ui_programs
+  [ "${ENABLE_NETWORKING}" = "1" ] || [ "${ENABLE_BLUETOOTH}" = "1" ] && cleanup_networking >> "${MOUNTPOINT}/logs/cleanup_network.log" 2>&1
+  reboot
+  exit 0
+}

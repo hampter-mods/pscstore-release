@@ -1,2 +1,28 @@
-# Auto detect text files and perform LF normalization
+# Auto detect text files, but keep Project Eris shell payloads LF-only.
 * text=auto
+
+.gitattributes text eol=lf
+.gitignore text eol=lf
+README.md text eol=lf
+manifest.tsv text eol=lf
+files/media/project_eris/etc/project_eris/FUNC/*.funcs text eol=lf
+files/media/project_eris/etc/project_eris/SUP/scripts/* text eol=lf
+files/media/project_eris/etc/project_eris/SUP/launchers/*/launch.sh text eol=lf
+files/media/project_eris/etc/project_eris/SUP/launchers/pscstore/launcher.cfg text eol=lf
+files/media/project_eris/etc/project_eris/SUP/launchers/pscstore/disc-launcher/*.cue text eol=lf
+files/media/project_eris/opt/retroarch/config/retroarch/*.cfg text eol=lf
+*.sh text eol=lf
+
+*.bin binary
+*.db binary
+*.jpg binary
+*.ko binary
+*.mod binary
+*.pem text eol=lf
+*.png binary
+*.so binary
+*.wav binary
+files/media/project_eris/etc/project_eris/SUP/binaries/* binary
+files/media/project_eris/etc/project_eris/SUP/launchers/pscstore/pscstore binary
+files/media/project_eris/etc/project_eris/SUP/launchers/pscstore/pscstore_logger binary
+files/media/project_eris/opt/retroarch/retroarch binary

@@ -1,0 +1,17 @@
+Shadertoy Background Cube Attribution
+=====================================
+
+PSC Store's background cube is based on a slightly modified version of the
+Shadertoy shader "fill glow & outline glow" by Padej_.
+
+Shader page:
+https://www.shadertoy.com/view/33SBWz
+
+Page details noted for attribution:
+
+- Title: fill glow & outline glow
+- Author: Padej_
+- Created: 2025-11-05
+- Tags: glow
+- Description: simple glowing shader
+- Setting noted on page: bool fillCube

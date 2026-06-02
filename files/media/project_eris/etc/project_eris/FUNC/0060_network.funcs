@@ -1,0 +1,908 @@
+#!/bin/sh
+#
+#  Copyright 2020 ModMyClassic (https://modmyclassic.com/license)
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+###############################################################################
+# Project Eris Function Library - Networking
+# ModMyClassic.com / https://discordapp.com/invite/8gygsrw
+###############################################################################
+
+EXTRA_LIB="/media/project_eris/lib/:/media/project_eris/lib"
+PSC_TLS_HELPER="/media/project_eris/etc/project_eris/SUP/scripts/psc_tls_bundle.sh"
+
+[ -r "$PSC_TLS_HELPER" ] && . "$PSC_TLS_HELPER"
+
+pe_log()
+{
+  # Keep logging best-effort; networking may run before /run is fully ready.
+  msg="$*"
+  mkdir -p /tmp/logs >/dev/null 2>&1 || true
+  echo "[0060_network] $(date 2>/dev/null) $msg" >>/tmp/logs/network.log 2>/dev/null || true
+}
+
+pe_prepare_tls_bundle()
+{
+  # Build a strict, hash-verified CA bundle for PSC curl usage.
+  if command -v psc_tls_prepare_bundle >/dev/null 2>&1; then
+    psc_tls_prepare_bundle >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+pe_wait_for_ipv4()
+{
+  # pe_wait_for_ipv4 <ifname> [timeout_seconds]
+  ifname="$1"
+  timeout="${2:-15}"
+  i=0
+
+  while [ "$i" -lt "$timeout" ]; do
+    # BusyBox `ip` on PSC may not support `-o` output; prefer portable parsing.
+    ip -4 addr show dev "$ifname" 2>/dev/null | grep -q "inet " && return 0
+    ip addr show dev "$ifname" 2>/dev/null | grep -q "inet " && return 0
+    sleep 1
+    i=$((i+1))
+  done
+  return 1
+}
+
+pe_configure_dns()
+{
+  # Prefer stable public resolvers for WiFi; we intentionally override DHCP-provided DNS.
+  # This matches the previous behavior in show_logo.
+  resolv_run="/run/resolv.conf"
+  resolv_etc="/etc/resolv.conf"
+
+  printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" >"$resolv_run" 2>/dev/null || true
+  # Some environments read /etc/resolv.conf; keep it in sync if writable.
+  if [ -w "$resolv_etc" ] || [ ! -e "$resolv_etc" ]; then
+    printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" >"$resolv_etc" 2>/dev/null || true
+  fi
+
+  pe_log "dns set: $(cat "$resolv_run" 2>/dev/null | tr '\n' ' ')"
+}
+
+pe_http_date_to_ymdhms()
+{
+  # Convert an HTTP Date header value to "YYYY-MM-DD HH:MM:SS" (UTC).
+  # Input example: "Thu, 29 Jan 2026 02:08:48 GMT"
+  # Output: "2026-01-29 02:08:48"
+  awk '
+    BEGIN {
+      split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", m, " ");
+      for (i = 1; i <= 12; i++) mm[m[i]] = sprintf("%02d", i);
+    }
+    {
+      gsub(/\r/, "", $0);
+      # Remove leading weekday if present (e.g. "Thu,")
+      if ($1 ~ /,/) { sub(/,/, "", $1); day=$2; mon=$3; year=$4; tim=$5; }
+      else { day=$1; mon=$2; year=$3; tim=$4; }
+      if (mm[mon] == "") exit 1;
+      printf "%s-%s-%02d %s\n", year, mm[mon], day, tim;
+    }
+  ' 2>/dev/null
+}
+
+pe_try_http_time_sync()
+{
+  # Fallback: use HTTPS Date header if NTP is blocked/unavailable.
+  pe_prepare_tls_bundle || true
+
+  curlbin=""
+  if [ -x "/media/project_eris/etc/project_eris/SUP/binaries/psc_curl_static" ]; then
+    curlbin="/media/project_eris/etc/project_eris/SUP/binaries/psc_curl_static"
+  elif command -v curl >/dev/null 2>&1; then
+    curlbin="curl"
+  fi
+
+  if [ -z "$curlbin" ]; then
+    pe_log "time sync: no curl binary for HTTP fallback"
+    return 1
+  fi
+
+  pe_log "time sync: trying HTTP Date fallback ($curlbin)"
+
+  insecure=""
+  case "${PSC_CURL_INSECURE:-0}" in
+    1|true|TRUE|yes|YES|on|ON) insecure="-k" ;;
+  esac
+  if [ -z "$insecure" ] && ! pe_time_is_sane; then
+    # Bootstrap only: when clock is far off, cert validation can fail before we can read Date.
+    insecure="-k"
+    pe_log "time sync: clock not sane; using insecure Date bootstrap once"
+  fi
+  cacert_opt=""
+  if [ -z "$insecure" ]; then
+    if [ -n "${PSC_CURL_CA_BUNDLE:-}" ] && [ -r "${PSC_CURL_CA_BUNDLE}" ]; then
+      cacert_opt="--cacert ${PSC_CURL_CA_BUNDLE}"
+    elif [ -r "/media/project_eris/etc/project_eris/SUP/keys/cacert.pem" ]; then
+      cacert_opt="--cacert /media/project_eris/etc/project_eris/SUP/keys/cacert.pem"
+    elif [ -r "/etc/ssl/certs/ca-certificates.crt" ]; then
+      cacert_opt="--cacert /etc/ssl/certs/ca-certificates.crt"
+    elif [ -r "/etc/ssl/cert.pem" ]; then
+      cacert_opt="--cacert /etc/ssl/cert.pem"
+    elif [ -r "/etc/pki/tls/certs/ca-bundle.crt" ]; then
+      cacert_opt="--cacert /etc/pki/tls/certs/ca-bundle.crt"
+    fi
+    if [ -z "$cacert_opt" ]; then
+      pe_log "time sync: no CA bundle found; relying on curl default trust path"
+    fi
+  fi
+
+  hdr="$($curlbin $insecure $cacert_opt -sI --connect-timeout 2 -m 5 "https://www.google.com" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="date"{print $2; exit}')"
+  if [ -z "$hdr" ]; then
+    hdr="$($curlbin $insecure $cacert_opt -sI --connect-timeout 2 -m 5 "https://cloudflare.com" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="date"{print $2; exit}')"
+  fi
+  if [ -z "$hdr" ]; then
+    pe_log "time sync: HTTP fallback failed (no Date header)"
+    return 1
+  fi
+
+  ymdhms="$(printf "%s\n" "$hdr" | pe_http_date_to_ymdhms)"
+  if [ -z "$ymdhms" ]; then
+    pe_log "time sync: HTTP fallback parse failed (hdr='$hdr')"
+    return 1
+  fi
+
+  if date -u -s "$ymdhms" >/dev/null 2>&1; then
+    pe_log "time sync: HTTP fallback set UTC to $ymdhms"
+    return 0
+  fi
+
+  # Some busybox builds don't support -u with -s
+  if TZ=UTC date -s "$ymdhms" >/dev/null 2>&1; then
+    pe_log "time sync: HTTP fallback set TZ=UTC to $ymdhms"
+    return 0
+  fi
+
+  pe_log "time sync: HTTP fallback failed to set time (ymdhms='$ymdhms')"
+  return 1
+}
+
+pe_sync_time()
+{
+  # Prefer HTTPS Date-based sync using the known-good static curl binary.
+  # This is more robust than NTP on many home networks (UDP/123 often blocked).
+  servers="time.cloudflare.com time.google.com pool.ntp.org"
+
+  pe_log "time sync: prefer HTTPS Date header"
+  if pe_try_http_time_sync; then
+    pe_log "time sync: HTTPS Date ok"
+    return 0
+  fi
+  pe_log "time sync: HTTPS Date failed; trying NTP"
+
+  # BusyBox ntpd (common on embedded)
+  if command -v ntpd >/dev/null 2>&1; then
+    pe_log "time sync: using ntpd"
+    # -n: don't daemonize, -q: quit after set, -p: peer
+    ntpd -n -q $(for s in $servers; do echo "-p $s"; done) >/tmp/logs/ntpd.out 2>/tmp/logs/ntpd.err
+    rc=$?
+    pe_log "time sync: ntpd rc=$rc"
+    if [ "$rc" -eq 0 ]; then
+      pe_log "time sync done: now=$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+      return 0
+    fi
+  fi
+
+  if command -v busybox >/dev/null 2>&1; then
+    # Some systems provide ntpd only via busybox applet.
+    if busybox ntpd -n -q $(for s in $servers; do echo "-p $s"; done) >/tmp/logs/ntpd.out 2>/tmp/logs/ntpd.err 2>/dev/null; then
+      pe_log "time sync: using busybox ntpd (ok)"
+      pe_log "time sync done: now=$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+      return 0
+    else
+      pe_log "time sync: busybox ntpd failed"
+    fi
+  fi
+
+  if command -v sntp >/dev/null 2>&1; then
+    # Fallback if sntp exists.
+    for s in $servers; do
+      pe_log "time sync: trying sntp $s"
+      sntp -sS "$s" >/tmp/logs/sntp.out 2>/tmp/logs/sntp.err && break
+    done
+    pe_log "time sync done: now=$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+    return 0
+  fi
+
+  pe_log "time sync failed"
+  return 1
+}
+
+pe_time_is_sane()
+{
+  # Consider time "sane" once it's beyond 2026-01-01T00:00:00Z (UTC).
+  # This prevents repeatedly forcing time sync after hotplug if the clock is already sane.
+  min_epoch=1767225600
+  now_epoch="$(date -u +%s 2>/dev/null)"
+  [ -n "$now_epoch" ] || now_epoch=0
+  [ "$now_epoch" -ge "$min_epoch" ] 2>/dev/null
+}
+
+pe_udhcpc_pid_alive()
+{
+  # pe_udhcpc_pid_alive <pidfile>
+  pidfile="$1"
+  [ -n "$pidfile" ] || return 1
+  [ -f "$pidfile" ] || return 1
+  pid="$(cat "$pidfile" 2>/dev/null)"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+pe_start_udhcpc()
+{
+  # pe_start_udhcpc <ifname>
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+
+  pidfile="/var/run/udhcpc.${ifname}.pid"
+  if pe_udhcpc_pid_alive "$pidfile"; then
+    return 0
+  fi
+
+  # Bring the interface up; hotplugged adapters can come up DOWN initially.
+  ip link set "$ifname" up >/dev/null 2>&1 || true
+
+  pe_log "dhcp: starting udhcpc on $ifname (pidfile=$pidfile)"
+  if echo "$ifname" | grep -Eq "^(wlan|wl)"; then
+    # For WiFi adapters we want a normal default route from DHCP, so do NOT pass -R.
+    udhcpc -x hostname:"${HOSTNAME}" -t 10 -n -p "$pidfile" -i "$ifname" >/dev/null 2>&1 &
+  else
+    # For wired adapters we typically avoid clobbering default routes with -R.
+    udhcpc -R -n -p "$pidfile" -i "$ifname" >/dev/null 2>&1 &
+  fi
+  return 0
+}
+
+pe_wpa_supplicant_running()
+{
+  # pe_wpa_supplicant_running <ifname>
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+  # Prefer the control socket as the source of truth; `ps` output is not reliable across
+  # BusyBox variants (often omits argv).
+  [ -S "/var/run/wpa_supplicant/${ifname}" ] && return 0
+  ps 2>/dev/null | grep -q "[w]pa_supplicant.*-i${ifname}"
+}
+
+pe_start_wpa_supplicant()
+{
+  # pe_start_wpa_supplicant <ifname> <conf_path>
+  ifname="$1"
+  conf="$2"
+  [ -n "$ifname" ] || return 1
+  [ -n "$conf" ] || return 1
+  [ -f "$conf" ] || return 1
+
+  # If the interface doesn't exist yet (hotplug later), don't start supplicant against a
+  # non-existent device. netmon will retry when the adapter appears.
+  if [ ! -d "/sys/class/net/${ifname}" ]; then
+    rm -f "/var/run/wpa_supplicant/${ifname}" 2>/dev/null || true
+    return 1
+  fi
+
+  ip link set "$ifname" up >/dev/null 2>&1 || true
+  pe_wifi_enforce_awake "$ifname" || true
+  if pe_wpa_supplicant_running "$ifname"; then
+    return 0
+  fi
+
+  mkdir -p /var/run/wpa_supplicant >/dev/null 2>&1 || true
+
+  pe_log "wifi: starting wpa_supplicant on $ifname (conf=$conf)"
+  LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${EXTRA_LIB}" /usr/sbin/wpa_supplicant -B -Dnl80211 -i"$ifname" -C/var/run/wpa_supplicant -c "$conf" >/dev/null 2>&1 || return 1
+
+  # Give the control socket a moment to appear so UI tools that immediately invoke wpa_cli
+  # don't hit "Cannot connect to wpa supplicant."
+  i=0
+  while [ "$i" -lt 3 ]; do
+    [ -S "/var/run/wpa_supplicant/${ifname}" ] && return 0
+    sleep 1
+    i=$((i+1))
+  done
+  return 1
+}
+
+pe_sanitize_wpa_config()
+{
+  # pe_sanitize_wpa_config <conf_path>
+  # Project Eris' default config can contain an SSID-less open network block.
+  # wpa_supplicant exposes that as "0 any", then scans forever unless an open AP
+  # exists nearby. That can leave the WiFi setup UI stuck on "Scanning networks".
+  conf="$1"
+  [ -n "$conf" ] || return 1
+  [ -f "$conf" ] || return 1
+
+  tmp="${conf}.pscstore.tmp"
+  awk '
+    BEGIN { in_net=0; has_ssid=0; buf="" }
+    /^[[:space:]]*network=\{/ {
+      in_net=1;
+      has_ssid=0;
+      buf=$0 "\n";
+      next;
+    }
+    in_net {
+      buf=buf $0 "\n";
+      if ($0 ~ /^[[:space:]]*ssid=/) has_ssid=1;
+      if ($0 ~ /^[[:space:]]*\}/) {
+        if (has_ssid) printf "%s", buf;
+        in_net=0;
+        has_ssid=0;
+        buf="";
+      }
+      next;
+    }
+    { print }
+    END {
+      if (in_net && has_ssid) printf "%s", buf;
+    }
+  ' "$conf" >"$tmp" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  }
+
+  if grep -q "network={" "$conf" 2>/dev/null && ! grep -q "network={" "$tmp" 2>/dev/null; then
+    pe_log "wifi: removed SSID-less wildcard network from $conf"
+  fi
+  mv "$tmp" "$conf" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  }
+  return 0
+}
+
+pe_wpa_cli()
+{
+  # pe_wpa_cli <ifname> <args...>
+  ifname="$1"; shift
+  command -v wpa_cli >/dev/null 2>&1 || return 1
+  LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${EXTRA_LIB}" wpa_cli -i "$ifname" -p /var/run/wpa_supplicant "$@" >/dev/null 2>&1
+}
+
+pe_wpa_state()
+{
+  # pe_wpa_state <ifname>
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+  command -v wpa_cli >/dev/null 2>&1 || return 1
+  LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${EXTRA_LIB}" wpa_cli -i "$ifname" -p /var/run/wpa_supplicant status 2>/dev/null |
+    awk -F= '$1=="wpa_state"{print $2; exit}'
+}
+
+pe_wifi_has_saved_networks()
+{
+  # pe_wifi_has_saved_networks <ifname> [wpa_conf]
+  ifname="$1"
+  conf="$2"
+  if command -v wpa_cli >/dev/null 2>&1; then
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${EXTRA_LIB}" wpa_cli -i "$ifname" -p /var/run/wpa_supplicant list_networks 2>/dev/null |
+      awk 'NR > 1 && $1 ~ /^[0-9]+$/ { found=1 } END { if (found) exit 0; exit 1 }' && return 0
+  fi
+  [ -n "$conf" ] && [ -f "$conf" ] && grep -q "^[[:space:]]*network={" "$conf" 2>/dev/null
+}
+
+pe_wifi_state_is_busy()
+{
+  # pe_wifi_state_is_busy <state>
+  # Do not kick supplicant while Project Eris is scanning or while association is in-flight.
+  case "$1" in
+    SCANNING|ASSOCIATING|ASSOCIATED|4WAY_HANDSHAKE|GROUP_HANDSHAKE)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+pe_wifi_is_connected()
+{
+  # pe_wifi_is_connected <ifname>
+  ifname="$1"
+  if command -v wpa_cli >/dev/null 2>&1; then
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${EXTRA_LIB}" wpa_cli -i "$ifname" -p /var/run/wpa_supplicant status 2>/dev/null | grep -q "^wpa_state=COMPLETED"
+    return $?
+  fi
+  if command -v iw >/dev/null 2>&1; then
+    iw dev "$ifname" link 2>/dev/null | grep -q "^Connected to"
+    return $?
+  fi
+  # If we can't query association state, don't block DHCP attempts.
+  return 0
+}
+
+pe_wifi_reconnect()
+{
+  # pe_wifi_reconnect <ifname>
+  ifname="$1"
+  # Best-effort: kick wpa_supplicant to (re)select saved networks.
+  pe_wpa_cli "$ifname" reconfigure || true
+  pe_wpa_cli "$ifname" enable_network all || true
+  pe_wpa_cli "$ifname" reassociate || pe_wpa_cli "$ifname" reconnect || true
+}
+
+pe_wifi_enforce_awake()
+{
+  # pe_wifi_enforce_awake <ifname>
+  # Keep adapters awake to avoid idle disconnects from runtime PM/power-save.
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+  [ -d "/sys/class/net/${ifname}" ] || return 1
+
+  ip link set "$ifname" up >/dev/null 2>&1 || true
+
+  # Disable 802.11 powersave where supported.
+  if command -v iw >/dev/null 2>&1; then
+    iw dev "$ifname" set power_save off >/dev/null 2>&1 || true
+  fi
+  if command -v iwconfig >/dev/null 2>&1; then
+    iwconfig "$ifname" power off >/dev/null 2>&1 || true
+  fi
+
+  # Disable runtime autosuspend on netdev and parent USB path.
+  devpath="$(readlink -f "/sys/class/net/${ifname}/device" 2>/dev/null)"
+  while [ -n "$devpath" ] && [ "$devpath" != "/" ]; do
+    [ -w "${devpath}/power/control" ] && echo on >"${devpath}/power/control" 2>/dev/null || true
+    [ -w "${devpath}/power/autosuspend_delay_ms" ] && echo -1 >"${devpath}/power/autosuspend_delay_ms" 2>/dev/null || true
+    parent="$(dirname "$devpath" 2>/dev/null)"
+    [ -n "$parent" ] || break
+    [ "$parent" = "$devpath" ] && break
+    devpath="$parent"
+  done
+  return 0
+}
+
+pe_wifi_hard_recover()
+{
+  # pe_wifi_hard_recover <ifname> [wpa_conf]
+  # Deterministic recovery path when link keeps dropping while idle.
+  ifname="$1"
+  wpa_conf="$2"
+  [ -n "$ifname" ] || return 1
+
+  now_epoch="$(date -u +%s 2>/dev/null)"
+  [ -n "$now_epoch" ] || now_epoch=0
+  tsfile="/tmp/pe_wifi_hard_recover.${ifname}.ts"
+  last_epoch="$(cat "$tsfile" 2>/dev/null)"
+  [ -n "$last_epoch" ] || last_epoch=0
+  if [ "$now_epoch" -ne 0 ] && [ $((now_epoch - last_epoch)) -lt 20 ]; then
+    return 0
+  fi
+  echo "$now_epoch" >"$tsfile" 2>/dev/null || true
+
+  pe_log "wifi: hard recover on $ifname"
+  pe_wpa_cli "$ifname" disconnect || true
+  pe_wpa_cli "$ifname" terminate || true
+  rm -f "/var/run/wpa_supplicant/${ifname}" 2>/dev/null || true
+  ip link set "$ifname" down >/dev/null 2>&1 || true
+  sleep 1
+  ip link set "$ifname" up >/dev/null 2>&1 || true
+  pe_wifi_enforce_awake "$ifname" || true
+
+  if [ -n "$wpa_conf" ] && [ -f "$wpa_conf" ]; then
+    pe_start_wpa_supplicant "$ifname" "$wpa_conf" || true
+  fi
+  pe_wifi_reconnect "$ifname"
+  pe_restart_udhcpc "$ifname"
+}
+
+pe_iface_has_carrier()
+{
+  # pe_iface_has_carrier <ifname>
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+  if [ -f "/sys/class/net/${ifname}/carrier" ]; then
+    [ "$(cat "/sys/class/net/${ifname}/carrier" 2>/dev/null)" = "1" ]
+    return $?
+  fi
+  ip link show "$ifname" 2>/dev/null | grep -q "LOWER_UP"
+}
+
+pe_restart_udhcpc()
+{
+  # pe_restart_udhcpc <ifname>
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+
+  pidfile="/var/run/udhcpc.${ifname}.pid"
+  if pe_udhcpc_pid_alive "$pidfile"; then
+    pid="$(cat "$pidfile" 2>/dev/null)"
+    now_epoch="$(date -u +%s 2>/dev/null)"
+    [ -n "$now_epoch" ] || now_epoch=0
+    tsfile="/tmp/pe_udhcpc_restart.${ifname}.ts"
+    last_epoch="$(cat "$tsfile" 2>/dev/null)"
+    [ -n "$last_epoch" ] || last_epoch=0
+
+    # Cooldown to avoid kill-spam on flappy links.
+    if [ "$now_epoch" -eq 0 ] || [ $((now_epoch - last_epoch)) -ge 5 ]; then
+      pe_log "dhcp: restarting udhcpc on $ifname (pid=$pid)"
+      kill "$pid" 2>/dev/null || true
+      rm -f "$pidfile" 2>/dev/null || true
+      echo "$now_epoch" >"$tsfile" 2>/dev/null || true
+    fi
+  fi
+
+  pe_start_udhcpc "$ifname"
+}
+
+pe_network_monitor_start()
+{
+  # Watches for interface/IP/default-route changes and re-applies DNS + time sync.
+  # Also restarts udhcpc if adapters are unplugged/replugged or names change (e.g. enx*).
+  # Also (re)starts wpa_supplicant for wifi interfaces that are not wlan0 (common after hotplug).
+  # Disable by setting PE_DISABLE_NET_MONITOR=1.
+  # Optional: pe_network_monitor_start <wpa_conf>
+  [ "${PE_DISABLE_NET_MONITOR:-0}" = "1" ] && return 0
+  wpa_conf="$1"
+
+  pidfile="/tmp/pe_network_monitor.pid"
+  if [ -f "$pidfile" ]; then
+    oldpid="$(cat "$pidfile" 2>/dev/null)"
+    if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  (
+    echo "$$" >"$pidfile" 2>/dev/null || true
+    pe_log "netmon: started (pid=$$)"
+
+    last_sig=""
+    last_sync_epoch=0
+    last_sync_ok=0
+    last_wifi_kick_epoch=0
+    last_stable_sig=""
+    stable_count=0
+
+    while true; do
+      ifaces="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*$//' | grep -E '^(wlan|wl|eth|enx|usb)')"
+
+      # Ensure wifi supplicant stays alive across adapter swaps (wlan1, etc).
+      if [ -n "$wpa_conf" ] && [ -f "$wpa_conf" ]; then
+        for wif in $(printf "%s\n" "$ifaces" | grep -E '^(wlan|wl)'); do
+          # Hotplugged adapters may appear DOWN; bring them up and start supplicant anyway.
+          pe_wifi_enforce_awake "$wif" || true
+          pe_start_wpa_supplicant "$wif" "$wpa_conf"
+        done
+      fi
+
+      # If WiFi isn't associating automatically, periodically kick it (similar to Network Manager behavior).
+      now_epoch="$(date -u +%s 2>/dev/null)"
+      if [ -z "$now_epoch" ]; then now_epoch=0; fi
+      time_sane=0
+      if pe_time_is_sane; then
+        time_sane=1
+        # If the clock is already sane, don't keep forcing a time sync on every hotplug/replug.
+        last_sync_ok=1
+      fi
+      wifi_kick_interval="${PE_WIFI_AUTO_RECONNECT_INTERVAL:-30}"
+      case "$wifi_kick_interval" in
+        *[!0-9]*|"") wifi_kick_interval=30 ;;
+      esac
+      [ "$wifi_kick_interval" -lt 5 ] 2>/dev/null && wifi_kick_interval=5
+
+      if [ "$now_epoch" -eq 0 ] || [ $((now_epoch - last_wifi_kick_epoch)) -ge "$wifi_kick_interval" ]; then
+        for wif in $(printf "%s\n" "$ifaces" | grep -E '^(wlan|wl)'); do
+          pe_wifi_enforce_awake "$wif" || true
+          if pe_wifi_is_connected "$wif"; then
+            rm -f "/tmp/pe_wifi_disc_fail.${wif}" 2>/dev/null || true
+            # Keep DHCP lease maintenance alive during long idle periods.
+            if ip -4 addr show dev "$wif" 2>/dev/null | grep -q "inet " || ip addr show dev "$wif" 2>/dev/null | grep -q "inet "; then
+              pe_start_udhcpc "$wif"
+            fi
+          else
+            wpa_state="$(pe_wpa_state "$wif" 2>/dev/null)"
+            if pe_wifi_state_is_busy "$wpa_state"; then
+              pe_log "wifi: ${wif} state=${wpa_state}; leaving Project Eris scan/connect flow alone"
+              continue
+            fi
+            if ! pe_wifi_has_saved_networks "$wif" "$wpa_conf"; then
+              rm -f "/tmp/pe_wifi_disc_fail.${wif}" 2>/dev/null || true
+              pe_log "wifi: ${wif} has no saved networks; not auto-reconnecting during setup"
+              continue
+            fi
+            pe_wifi_reconnect "$wif"
+            fail_n="$(cat "/tmp/pe_wifi_disc_fail.${wif}" 2>/dev/null)"
+            [ -n "$fail_n" ] || fail_n=0
+            fail_n=$((fail_n+1))
+            echo "$fail_n" >"/tmp/pe_wifi_disc_fail.${wif}" 2>/dev/null || true
+            # Hard recovery kills/restarts supplicant, which can race Project Eris' WiFi setup UI.
+            # Keep it opt-in for unattended installs; normal setup should never be interrupted.
+            hard_recover_after="${PE_WIFI_HARD_RECOVER_AFTER:-6}"
+            case "$hard_recover_after" in
+              *[!0-9]*|"") hard_recover_after=6 ;;
+            esac
+            if [ "${PE_WIFI_ENABLE_HARD_RECOVER:-0}" = "1" ] && [ "$fail_n" -ge "$hard_recover_after" ]; then
+              pe_wifi_hard_recover "$wif" "$wpa_conf"
+              echo 0 >"/tmp/pe_wifi_disc_fail.${wif}" 2>/dev/null || true
+            fi
+          fi
+        done
+        last_wifi_kick_epoch="$now_epoch"
+      fi
+
+      # Ensure DHCP runs for any interface that currently lacks IPv4.
+      # (Do not require "state UP"; hotplug often starts DOWN until we flip it.)
+      for ifname in $(printf "%s\n" "$ifaces" | grep -E '^(wlan|wl|eth|enx|usb)'); do
+        ip -4 addr show dev "$ifname" 2>/dev/null | grep -q "inet " && continue
+        ip addr show dev "$ifname" 2>/dev/null | grep -q "inet " && continue
+
+        # For WiFi, prefer association state; if that check is transiently false but carrier is up,
+        # still allow DHCP recovery attempts.
+        if echo "$ifname" | grep -q "^wlan" || echo "$ifname" | grep -q "^wl"; then
+          if ! pe_wifi_is_connected "$ifname"; then
+            pe_iface_has_carrier "$ifname" || continue
+          fi
+        else
+          # For wired/hotplug adapters, only try DHCP when the link has carrier.
+          pe_iface_has_carrier "$ifname" || continue
+        fi
+
+        # If udhcpc is already running but we're still missing IPv4 (common after unplug/replug),
+        # restart it so it re-enters DISCOVER instead of staying stuck.
+        pidfile="/var/run/udhcpc.${ifname}.pid"
+        if pe_udhcpc_pid_alive "$pidfile"; then
+          pe_restart_udhcpc "$ifname"
+        else
+          pe_start_udhcpc "$ifname"
+        fi
+      done
+
+      # Build a signature of current IPv4 addresses + default route.
+      addrs="$(ip -4 addr show 2>/dev/null | grep -E 'inet ' | tr '\n' ' ')"
+      if [ -z "$addrs" ]; then
+        addrs="$(ip addr show 2>/dev/null | grep -E 'inet ' | tr '\n' ' ')"
+      fi
+      route="$(ip route show default 2>/dev/null | tr '\n' ' ')"
+      sig="$addrs|$route"
+      src_ip="$(printf "%s\n" "$route" | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' 2>/dev/null)"
+      [ -n "$src_ip" ] || src_ip=""
+      if [ -z "$addrs" ] && [ -n "$src_ip" ]; then
+        addrs="src=${src_ip}"
+        sig="$addrs|$route"
+      fi
+
+      have_ipv4=0
+      [ -n "$addrs" ] && have_ipv4=1
+      sig_changed=0
+      [ "$sig" != "$last_sig" ] && sig_changed=1
+
+      # Determine whether the network is actually usable/stable yet.
+      # We only time-sync when we have:
+      # - a default route device
+      # - IPv4 on that device
+      # - (if WiFi) association completed
+      def_dev="$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+      stable_now=0
+      if [ -n "$def_dev" ]; then
+        have_ip_on_def=0
+        if ip -4 addr show dev "$def_dev" 2>/dev/null | grep -q "inet " || ip addr show dev "$def_dev" 2>/dev/null | grep -q "inet "; then
+          have_ip_on_def=1
+        elif [ -n "$src_ip" ] && printf "%s\n" "$route" | grep -q "dev ${def_dev}"; then
+          # Some BusyBox `ip` builds don't show addrs reliably but do include `src` in routes.
+          have_ip_on_def=1
+        fi
+        if [ "$have_ip_on_def" -eq 1 ]; then
+          if echo "$def_dev" | grep -Eq '^(wlan|wl)'; then
+            pe_wifi_is_connected "$def_dev" && stable_now=1
+          else
+            pe_iface_has_carrier "$def_dev" && stable_now=1
+          fi
+        fi
+      fi
+
+      gw_ip="$(printf "%s\n" "$route" | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' 2>/dev/null)"
+      [ -n "$gw_ip" ] || gw_ip=""
+
+      # Use a minimal stable signature so whitespace/order changes in `ip addr` output don't
+      # prevent us from considering the network stable long enough to sync time.
+      stable_sig="${def_dev}|${gw_ip}|${src_ip}"
+      if [ "$stable_now" -eq 1 ]; then
+        if [ "$stable_sig" = "$last_stable_sig" ]; then
+          stable_count=$((stable_count+1))
+        else
+          stable_count=1
+          last_stable_sig="$stable_sig"
+        fi
+      else
+        stable_count=0
+        last_stable_sig=""
+      fi
+
+      # If we lost IPv4 (unplug/replug), remember the "down" signature so the next
+      # reconnect triggers re-apply + time sync even if we end up with the same lease.
+      if [ "$have_ipv4" -ne 1 ]; then
+        if [ "$sig_changed" -eq 1 ]; then
+          pe_log "netmon: IPv4 lost (sig='$sig')"
+          last_sig="$sig"
+        fi
+        # Only force time sync on reconnect if the clock is not yet sane.
+        if [ "$time_sane" -ne 1 ]; then
+          last_sync_ok=0
+          last_sync_epoch=0
+        fi
+      fi
+
+      # DNS can be overwritten on DHCP renew even if the IP/route doesn't change.
+      dns_ok=0
+      if [ -f /run/resolv.conf ] && grep -q "nameserver 1.1.1.1" /run/resolv.conf 2>/dev/null &&
+         grep -q "nameserver 8.8.8.8" /run/resolv.conf 2>/dev/null; then
+        dns_ok=1
+      fi
+
+      if [ "$have_ipv4" -eq 1 ] && { [ "$sig_changed" -eq 1 ] || [ "$dns_ok" -ne 1 ]; }; then
+        pe_log "netmon: network/dns change detected (dns_ok=$dns_ok sig_changed=$sig_changed sig='$sig')"
+        pe_configure_dns
+      fi
+
+      # If time sync failed earlier, keep retrying while online (rate-limited).
+      if [ "$have_ipv4" -eq 1 ]; then
+        want_sync=0
+        if [ "$time_sane" -ne 1 ]; then
+          # Only attempt time sync once the network is stable (prevents races during hotplug).
+          if [ "$stable_count" -ge 2 ]; then
+            want_sync=1
+            # On the first moment we consider the network stable, sync immediately (ignore cooldown).
+            [ "$stable_count" -eq 2 ] && last_sync_epoch=0
+            if [ "$stable_count" -eq 2 ] && [ "$want_sync" -eq 1 ]; then
+              pe_log "netmon: stable network on ${def_dev} (gw=${gw_ip} src=${src_ip}); time not sane -> syncing"
+            fi
+          fi
+        fi
+        if [ "$want_sync" -eq 1 ]; then
+          # For hotplug/replug or network changes, don't wait out the normal rate-limit window
+          # (only relevant while the clock is not yet sane).
+          [ "$sig_changed" -eq 1 ] && last_sync_epoch=0
+          # Rate-limit time sync to avoid spamming on flappy links.
+          if [ "$now_epoch" -eq 0 ] || [ $((now_epoch - last_sync_epoch)) -ge 60 ]; then
+            if pe_sync_time; then
+              last_sync_ok=1
+            else
+              last_sync_ok=0
+            fi
+            last_sync_epoch="$now_epoch"
+          else
+            pe_log "netmon: skip time sync (rate-limited)"
+          fi
+        fi
+        # Update after processing so `sig_changed` refers to the current loop.
+        last_sig="$sig"
+      fi
+
+      sleep 2
+    done
+  ) >/dev/null 2>&1 &
+
+  return 0
+}
+
+turn_on_bt()
+{
+  sleep 2
+  echo -e 'power on' | LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${EXTRA_LIB}" bluetoothctl
+}
+
+init_networking()
+{
+  WPA_PATH="/network/etc/wpa_supplicant"
+  NET_MOD_PATH="/network/lib/modules/4.4.22"
+  CFG_PATH="/etc/project_eris/CFG"
+  mount -t overlay -o lowerdir="/etc":"${PROJECT_ERIS_PATH}/network/etc" "overlay-NETWORK-etc" "/etc"
+  mount -t overlay -o lowerdir="/lib":"${PROJECT_ERIS_PATH}/network/lib" "overlay-NETWORK-lib" "/lib"
+  mount -t overlay -o lowerdir="/usr":"${PROJECT_ERIS_PATH}/network/usr" "overlay-NETWORK-etc" "/usr"
+  #Create Module folder on rootfs (script in squashfs to protect from corruption issues)
+  sh /usr/share/check_module_folder.sh
+  if [ ! -f "${PROJECT_ERIS_PATH}${WPA_PATH}/wpa_supplicant.conf" ]; then
+    cp "${PROJECT_ERIS_PATH}${WPA_PATH}/wpa_supplicant_DEFAULT.conf" "${PROJECT_ERIS_PATH}${WPA_PATH}/wpa_supplicant.conf"
+  fi
+  if [ ! -f "${PROJECT_ERIS_PATH}${NET_MOD_PATH}/modules.order" ]; then
+    cd "${PROJECT_ERIS_PATH}${NET_MOD_PATH}" 
+    find kernel/ | grep .ko > "modules.order"
+  fi
+  if [ -f "${PROJECT_ERIS_PATH}${NET_MOD_PATH}/modules.order" ]; then
+    rm "${PROJECT_ERIS_PATH}${NET_MOD_PATH}/modules.order"
+	cd "${PROJECT_ERIS_PATH}${NET_MOD_PATH}" 
+    find kernel/ | grep .ko > "modules.order"
+  fi
+  depmod -b /media/project_eris/network -a
+  cat "${PROJECT_ERIS_PATH}${CFG_PATH}/modules_to_load.cfg" | xargs -I % modprobe %
+  ip link set wlan0 up
+  if [ -f "${PROJECT_ERIS_PATH}${CFG_PATH}/ssid.cfg" ]; then
+    cat "${PROJECT_ERIS_PATH}${CFG_PATH}/ssid.cfg" | wifi-wpa-setup 
+    rm "${PROJECT_ERIS_PATH}${CFG_PATH}/ssid.cfg"
+  fi
+  systemctl restart ssh.service
+  systemctl restart telnet.socket
+  systemctl restart ftp.socket
+  # Pick an available WiFi interface; hotplug can rename it to wlan1/wl*.
+  wifi_if="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*$//' | grep -E '^(wlan|wl)' | head -n 1)"
+  if [ -z "$wifi_if" ]; then
+    pe_log "wifi: no adapter present at init; deferring wpa_supplicant/DHCP until hotplug"
+  else
+    ip link set "$wifi_if" up >/dev/null 2>&1 || true
+    pe_wifi_enforce_awake "$wifi_if" || true
+  fi
+  wpa_conf="${PROJECT_ERIS_PATH}${WPA_PATH}/wpa_supplicant.conf"
+  pe_sanitize_wpa_config "$wpa_conf" || true
+  if [ -n "$wifi_if" ]; then
+    pe_start_wpa_supplicant "$wifi_if" "$wpa_conf" || pe_log "wifi: failed to start wpa_supplicant on $wifi_if"
+    pe_wifi_enforce_awake "$wifi_if" || true
+  fi
+  # For wired adapters
+  eth_if="eth0"
+  ip link show "$eth_if" >/dev/null 2>&1 || eth_if="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*$//' | grep -E '^(eth|enx)' | head -n 1)"
+  if [ -n "$eth_if" ]; then
+    ip link set "$eth_if" up >/dev/null 2>&1 || true
+    udhcpc -R -n -p "/var/run/udhcpc.${eth_if}.pid" -i "$eth_if" &
+  fi
+  # For wireless adapters
+  # NOTE: For WiFi adapters we want a normal default route from DHCP, so do NOT pass -R.
+  if [ -n "$wifi_if" ]; then
+    udhcpc -x hostname:"${HOSTNAME}" -t 10 -n -p "/var/run/udhcpc.${wifi_if}.pid" -i "$wifi_if" &
+  fi
+
+  # Post WiFi bring-up: DNS + time sync (migrated from show_logo).
+  if [ -n "$wifi_if" ] && pe_wait_for_ipv4 "$wifi_if" 20; then
+    pe_log "$wifi_if has IPv4: $(ip -4 addr show dev "$wifi_if" 2>/dev/null | tr '\n' ' ')"
+    pe_configure_dns
+    pe_sync_time
+  else
+    pe_log "$wifi_if IPv4 timeout; skipping dns/time sync"
+  fi
+
+  # Keep DNS + time sync correct across unplug/replug, SSID changes, and adapter swaps.
+  pe_network_monitor_start "$wpa_conf"
+}
+
+init_bluetooth()
+{
+  chmod +x "${PROJECT_ERIS_PATH}/bluetooth/bin/"*
+  mkdir -p "/var/volatile/mount/lib/modulesw" "/var/volatile/mount/usr" "/var/volatile/mount/lib/firmware/brcm" "/var/lib/bluetooth"
+  if [ -z "$(mount | grep '\-NETWORK\-')" ]; then
+    mount -t overlay -o lowerdir="/etc":"${PROJECT_ERIS_PATH}/network/etc" "overlay-NETWORK-etc" "/etc"
+    mount -t overlay -o lowerdir="/lib":"${PROJECT_ERIS_PATH}/network/lib" "overlay-NETWORK-lib" "/lib"
+    mount -t overlay -o lowerdir="/usr":"${PROJECT_ERIS_PATH}/network/usr" "overlay-NETWORK-etc" "/usr"
+    #Create Module folder on rootfs (script in squashfs to protect from corruption issues)
+    sh /usr/share/check_module_folder.sh
+  fi
+  if [ -f "${PROJECT_ERIS_PATH}/bluetooth/connections.tar.gz" ]; then
+    cp -f "${PROJECT_ERIS_PATH}/bluetooth/connections.tar.gz" "/var/lib/bluetooth/"
+    tar -xzf "/var/lib/bluetooth/connections.tar.gz" -C "/var/lib/bluetooth/" && rm -rf "/var/lib/bluetooth/connections.tar.gz"
+  fi
+  # Partially reload DBUS configs without kicking everything off the bus
+  kill -1 $(ps | grep dbus | head -1 | awk '{ print $1 }')
+  systemctl restart bluetooth.service
+  turn_on_bt &
+  LD_LIBRARY_PATH="/media/project_eris/lib" busybox-pe inetd busybox-pe inetd "/media/project_eris/network/inetd.conf"
+}
+
+cleanup_networking()
+{
+  if [ "${ENABLE_BLUETOOTH}" = "1" ]; then
+    if [ ! -z "$(ls -A /var/lib/bluetooth/)" ]; then
+      tar -cvzf "/var/lib/bluetooth/connections.tar.gz" -C "/var/lib/bluetooth/" .
+      cp -fv "/var/lib/bluetooth/connections.tar.gz" "${PROJECT_ERIS_PATH}/bluetooth/"
+    fi
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${EXTRA_LIB}" bluetoothctl power off
+    systemctl stop bluetooth
+  fi
+  sync
+  killall wpa_supplicant &> "/dev/null"
+  umount "/lib"
+  umount "/etc"
+  umount "/usr"
+}

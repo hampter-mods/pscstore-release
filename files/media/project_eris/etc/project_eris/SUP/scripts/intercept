@@ -1,0 +1,1092 @@
+#!/bin/sh
+#
+#  Copyright 2020 ModMyClassic (https://modmyclassic.com/license)
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+###############################################################################
+# PlayStation Classic Stock UI to Emulator Intercept Script
+# ModMyClassic.com / https://discordapp.com/invite/8gygsrw
+###############################################################################
+
+START=$(date +%s%N)
+### LOAD CONFIGURATION ########################################################
+source "/var/volatile/project_eris.cfg"
+
+### LOAD FUNCTION LIBRARIES ###################################################
+source "/media/project_eris/etc/project_eris/FUNC/0030_retroarch.funcs"
+
+### INTERCEPT VARIABLES #######################################################
+INTERCEPT_PCSX_PATH="/usr/sony/bin/pcsx"
+INTERCEPT_GAME_PATH=""
+INTERCEPT_GAME_DIR=""
+INTERCEPT_GAME_ID=""
+INTERCEPT_GAME_EXT=""
+INTERCEPT_GAME_ALTERNATIVE_PATH=""
+INTERCEPT_SAVE_STATE=false
+DISC_LAUNCHER_ERROR_SCREENS_DIR="${PSC_DISC_LAUNCHER_ERROR_SCREENS_DIR:-/media/project_eris/etc/project_eris/SUP/launchers/pscstore/assets/pscdisclauncher-error-screens}"
+DISC_LAUNCHER_MODULES_DIR="/media/project_eris/etc/project_eris/SUP/cdrom"
+INTERCEPT_FILE_FORMATS=(    # alternative PCSX ReARMed game formats
+  "m3u"
+  "pbp"
+  "img"
+  "iso"
+  "mdf"
+  "toc"
+  "cbn"
+  "chd"
+)
+UI_MENU_PID=""
+### INTERCEPT FUNCTIONS #######################################################
+delayed_sdl_display_kill() {
+  sleep 30
+  killall sdl_display
+}
+show_disc_launcher_error_screen() {
+  # Prefer a dedicated error image if present, fall back to ra_loading.png
+  local ERR_IMG=""
+
+  if [ -f "${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_error.png" ]; then
+    ERR_IMG="${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_error.png"
+  elif [ -f "${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png" ]; then
+    ERR_IMG="${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png"
+  elif [ -f "${THEMES_PATH}/stock/menu_files/ra_loading.png" ]; then
+    ERR_IMG="${THEMES_PATH}/stock/menu_files/ra_loading.png"
+  fi
+
+  if [ -n "${ERR_IMG}" ]; then
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: showing error screen ${ERR_IMG}"
+    "${PROJECT_ERIS_PATH}/bin/sdl_display" "${ERR_IMG}" &
+
+    # Auto-dismiss after ~30s
+    delayed_sdl_display_kill &
+  else
+    echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: no error image found to display"
+  fi
+}
+show_disc_launcher_invalid_disc_screen() {
+  # Dedicated invalid-disc image, then fall back to disc_launcher_error / ra_loading
+  local ERR_IMG=""
+
+  if [ -f "${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_invalid_disc.png" ]; then
+    ERR_IMG="${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_invalid_disc.png"
+  elif [ -f "${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_error.png" ]; then
+    ERR_IMG="${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_error.png"
+  elif [ -f "${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png" ]; then
+    ERR_IMG="${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png"
+  elif [ -f "${THEMES_PATH}/stock/menu_files/ra_loading.png" ]; then
+    ERR_IMG="${THEMES_PATH}/stock/menu_files/ra_loading.png"
+  fi
+
+  if [ -n "${ERR_IMG}" ]; then
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: showing invalid-disc screen ${ERR_IMG}"
+    "${PROJECT_ERIS_PATH}/bin/sdl_display" "${ERR_IMG}" &
+
+    # Auto-dismiss after ~30s
+    delayed_sdl_display_kill &
+  else
+    echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: no invalid-disc image found to display"
+  fi
+}
+
+show_disc_launcher_wrong_disc_screen() {
+  # Dedicated wrong-disc image, then fall back to invalid-disc / disc_launcher_error / ra_loading
+  local ERR_IMG=""
+
+  if [ -f "${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_wrong_disc.png" ]; then
+    ERR_IMG="${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_wrong_disc.png"
+  elif [ -f "${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_invalid_disc.png" ]; then
+    ERR_IMG="${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_invalid_disc.png"
+  elif [ -f "${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_error.png" ]; then
+    ERR_IMG="${DISC_LAUNCHER_ERROR_SCREENS_DIR}/ra_disc_launcher_error.png"
+  elif [ -f "${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png" ]; then
+    ERR_IMG="${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png"
+  elif [ -f "${THEMES_PATH}/stock/menu_files/ra_loading.png" ]; then
+    ERR_IMG="${THEMES_PATH}/stock/menu_files/ra_loading.png"
+  fi
+
+  if [ -n "${ERR_IMG}" ]; then
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: showing wrong-disc screen ${ERR_IMG}"
+    "${PROJECT_ERIS_PATH}/bin/sdl_display" "${ERR_IMG}" &
+
+    # Auto-dismiss after ~30s
+    delayed_sdl_display_kill &
+  else
+    echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: no wrong-disc image found to display"
+  fi
+}
+find_any_cdrom_dev() {
+  # Return the first existing /dev/sr* block device, or nothing if none.
+  for dev in /dev/sr*; do
+    [ "${dev}" = "/dev/sr*" ] && continue
+    [ -b "${dev}" ] || continue
+    echo "[PROJECT ERIS](INTERCEPT)(DEBUG) candidate cdrom device: ${dev}" >&2
+    echo "${dev}"
+    return 0
+  done
+  return 1
+}
+find_ra_cdrom_index_by_scsi() {
+  # Map /dev/srX to RetroArch's drive index using stable SCSI address ordering.
+  # This avoids races with /dev/disk/by-path when udev is slow to populate.
+  local dev="$1"
+  local dev_base=""
+  local idx=0
+  local entry=""
+  local scsi_addr=""
+  local scsi_list=""
+  local addr=""
+  local name=""
+
+  [ -n "${dev}" ] || return 1
+  dev_base="${dev##*/}"
+
+  for entry in /sys/block/sd* /sys/block/sr*; do
+    [ -e "${entry}" ] || continue
+    case "${entry##*/}" in
+      *[0-9]) continue ;;
+    esac
+    scsi_addr="$(ls -d "${entry}/device/scsi_device/"* 2>/dev/null | head -n 1)"
+    [ -n "${scsi_addr}" ] || continue
+    scsi_addr="${scsi_addr##*/}"
+    scsi_list="${scsi_list}${scsi_addr} ${entry##*/}\n"
+  done
+
+  [ -n "${scsi_list}" ] || return 1
+
+  while read addr name; do
+    [ -n "${addr}" ] || continue
+    if [ "${name}" = "${dev_base}" ]; then
+      echo "${idx}"
+      return 0
+    fi
+    idx=$((idx+1))
+  done <<EOF
+$(printf "%b" "${scsi_list}" | sort -t ':' -k1,1n -k2,2n -k3,3n -k4,4n)
+EOF
+  return 1
+}
+wait_for_scsi_device() {
+  # Wait for /sys/block/<dev>/device/scsi_device to populate.
+  local dev="$1"
+  local tries=0
+  local max=50
+
+  [ -n "${dev}" ] || return 1
+  dev="${dev##*/}"
+
+  while [ $tries -lt $max ]; do
+    if ls -d "/sys/block/${dev}/device/scsi_device/"* 2>/dev/null | head -n 1 | grep -q .; then
+      return 0
+    fi
+    tries=$((tries+1))
+    usleep 200000
+  done
+  return 1
+}
+resolve_cdrom_drive_index() {
+  # Robustly wait for a stable SCSI mapping before deciding the drive index.
+  # Uses the same /sys/block scan you ran manually, and waits until the cdrom
+  # appears in that list before choosing its index.
+  local dev="$1"
+  local dev_base=""
+  local tries=0
+  local max=80
+  local list=""
+  local idx=""
+  local addr=""
+  local name=""
+
+  [ -n "${dev}" ] || return 1
+  dev_base="${dev##*/}"
+
+  while [ $tries -lt $max ]; do
+    list="$(
+      for b in /sys/block/sd* /sys/block/sr*; do
+        [ -e "$b" ] || continue
+        addr="$(ls -d "$b"/device/scsi_device/* 2>/dev/null | head -n 1)"
+        [ -n "$addr" ] && echo "${addr##*/} ${b##*/}"
+      done | sort -t ':' -k1,1n -k2,2n -k3,3n -k4,4n
+    )"
+
+    if echo "${list}" | grep -q " ${dev_base}$"; then
+      idx=0
+      while read addr name; do
+        [ -n "${addr}" ] || continue
+        if [ "${name}" = "${dev_base}" ]; then
+          echo "${idx}"
+          return 0
+        fi
+        idx=$((idx+1))
+      done <<EOF
+${list}
+EOF
+    fi
+
+    tries=$((tries+1))
+    usleep 500000
+  done
+
+  return 1
+}
+suspend_ui_menu() {
+  START_SUSPEND=$(date +%s%N)
+  UI_MENU_PID="$(ps | grep ui_menu | grep -v grep | awk '{print $1}')"
+  if [ $(echo "${UI_MENU_PID}" | wc -l) -ne 1 ]; then
+    echo "[PROJECT ERIS](INTERCEPT)(ERROR) unable to suspend ui_menu"
+    echo "[PROJECT ERIS](INTERCEPT)(ERROR) ui_menu is either not running, or more than one instance is running"
+    echo "[PROJECT ERIS](INTERCEPT)(ERROR) UI_MENU_PID: ${UI_MENU_PID}"
+    UI_MENU_PID=""
+  else
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) suspending ui_menu (PID ${UI_MENU_PID})"
+    kill -STOP "${UI_MENU_PID}"
+  fi
+  END_SUSPEND=$(date +%s%N)
+  echo "[PROJECT ERIS](INTERCEPT)(PROFILE) suspending ui_menu took: $(((END_SUSPEND-START_SUSPEND)/1000000))ms to execute"
+}
+
+resume_ui_menu() {
+  START_SUSPEND=$(date +%s%N)
+  sync_internal_shadow_slots_from_volatile
+  if [ ! "${UI_MENU_PID}" = "" ]; then
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) resuming ui_menu (PID ${UI_MENU_PID})"
+    kill -CONT "${UI_MENU_PID}"
+    UI_MENU_PID=""
+  fi
+  END_SUSPEND=$(date +%s%N)
+  echo "[PROJECT ERIS](INTERCEPT)(PROFILE) resuming ui_menu took: $(((END_SUSPEND-START_SUSPEND)/1000000))ms to execute"
+}
+
+# Persist volatile internal slot shadows back to real /data slots before UI resume.
+# This keeps memcards/savestates durable across game exits while ui_menu stays alive.
+sync_internal_shadow_slots_from_volatile() {
+  local VOL_DATAPCSX="/var/volatile/datatmp"
+  local SHADOW=""
+  local SRC_ID=""
+  local DST=""
+  local MEMDIR=""
+  local CARD=""
+  local NAME=""
+  local DST_CARD=""
+  local TARGET=""
+  local TMP=""
+  local BAK=""
+  local DST_MEM_BAK=""
+  local synced=0
+
+  [ -d "${VOL_DATAPCSX}" ] || return 0
+  for SHADOW in "${VOL_DATAPCSX}"/*; do
+    [ -d "${SHADOW}" ] || continue
+    [ -f "${SHADOW}/.psc_internal_slot_source" ] || continue
+    SRC_ID="$(cat "${SHADOW}/.psc_internal_slot_source" 2>/dev/null)"
+    case "${SRC_ID}" in
+      ''|*[!0-9]*) continue ;;
+    esac
+
+    # Convert any volatile memcard aliases to real files before copy-back.
+    MEMDIR="${SHADOW}/.pcsx/memcards"
+    if [ -d "${MEMDIR}" ]; then
+      for CARD in "${MEMDIR}"/card*.mcd; do
+        [ -L "${CARD}" ] || continue
+        TARGET="$(readlink "${CARD}" 2>/dev/null)"
+        case "${TARGET}" in
+          /var/volatile/datatmp/*/.pcsx/memcards/*.mcd)
+            TMP="${CARD}.pscfix.$$"
+            if cp -f "${CARD}" "${TMP}" 2>/dev/null && rm -f "${CARD}" && mv "${TMP}" "${CARD}"; then
+              :
+            else
+              rm -f "${TMP}" 2>/dev/null
+              rm -f "${CARD}" 2>/dev/null
+              BAK="${CARD%.mcd}.bak"
+              [ -f "${BAK}" ] && cp -f "${BAK}" "${CARD}" 2>/dev/null || true
+            fi
+            ;;
+        esac
+      done
+    fi
+
+    DST="/data/AppData/sony/pcsx/${SRC_ID}"
+    mkdir -p "${DST}/.pcsx/memcards" || continue
+    DST_MEM_BAK="/tmp/psc_memsync_${SRC_ID}_$$"
+    rm -rf "${DST_MEM_BAK}" 2>/dev/null
+    mkdir -p "${DST_MEM_BAK}" 2>/dev/null || true
+    [ -d "${DST}/.pcsx/memcards" ] && cp -af "${DST}/.pcsx/memcards/." "${DST_MEM_BAK}/" 2>/dev/null || true
+
+    [ -d "${SHADOW}/.pcsx" ] && cp -af "${SHADOW}/.pcsx/." "${DST}/.pcsx/" 2>/dev/null || true
+    [ -f "${SHADOW}/pcsx.cfg" ] && cp -af "${SHADOW}/pcsx.cfg" "${DST}/pcsx.cfg" 2>/dev/null || true
+
+    for NAME in card1.mcd card2.mcd; do
+      DST_CARD="${DST}/.pcsx/memcards/${NAME}"
+      if [ -L "${DST_CARD}" ]; then
+        TARGET="$(readlink "${DST_CARD}" 2>/dev/null)"
+        case "${TARGET}" in
+          /var/volatile/datatmp/*/.pcsx/memcards/*.mcd)
+            TMP="${DST_CARD}.pscfix.$$"
+            if cp -f "${DST_CARD}" "${TMP}" 2>/dev/null && rm -f "${DST_CARD}" && mv "${TMP}" "${DST_CARD}"; then
+              :
+            else
+              rm -f "${TMP}" 2>/dev/null
+              rm -f "${DST_CARD}" 2>/dev/null
+              [ -f "${DST_MEM_BAK}/${NAME}" ] && cp -f "${DST_MEM_BAK}/${NAME}" "${DST_CARD}" 2>/dev/null || true
+            fi
+            ;;
+        esac
+      fi
+      if [ ! -e "${DST_CARD}" ] && [ -f "${DST_MEM_BAK}/${NAME}" ]; then
+        cp -f "${DST_MEM_BAK}/${NAME}" "${DST_CARD}" 2>/dev/null || true
+      fi
+    done
+    rm -rf "${DST_MEM_BAK}" 2>/dev/null
+    synced=$((synced + 1))
+  done
+
+  [ "${synced}" -gt 0 ] && echo "[PROJECT ERIS](INTERCEPT)(INFO) synced internal slot shadows: ${synced}"
+}
+
+# For the active internal slot alias, ensure shadow memcards are not self/volatile symlinks.
+repair_active_shadow_memcards() {
+  local GAME_ID="$1"
+  local SHADOW=""
+  local SRC_ID=""
+  local MEMDIR=""
+  local NAME=""
+  local SRC_CARD=""
+  local DST_CARD=""
+  local BAK=""
+  local TARGET=""
+  local TMP=""
+  local NEED_FIX=0
+  local repaired=0
+
+  [ -n "${GAME_ID}" ] || return 0
+  SHADOW="/var/volatile/datatmp/${GAME_ID}"
+  [ -d "${SHADOW}" ] || return 0
+  [ -f "${SHADOW}/.psc_internal_slot_source" ] || return 0
+  SRC_ID="$(cat "${SHADOW}/.psc_internal_slot_source" 2>/dev/null)"
+  case "${SRC_ID}" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+
+  MEMDIR="${SHADOW}/.pcsx/memcards"
+  mkdir -p "${MEMDIR}" 2>/dev/null || true
+  for NAME in card1.mcd card2.mcd; do
+    SRC_CARD="/data/AppData/sony/pcsx/${SRC_ID}/.pcsx/memcards/${NAME}"
+    DST_CARD="${MEMDIR}/${NAME}"
+    BAK="/data/AppData/sony/pcsx/${SRC_ID}/.pcsx/memcards/${NAME%.mcd}.bak"
+    NEED_FIX=0
+
+    if [ -L "${DST_CARD}" ]; then
+      TARGET="$(readlink "${DST_CARD}" 2>/dev/null)"
+      case "${TARGET}" in
+        "${DST_CARD}"|/var/volatile/datatmp/*/.pcsx/memcards/*.mcd) NEED_FIX=1 ;;
+      esac
+    elif [ ! -e "${DST_CARD}" ]; then
+      NEED_FIX=1
+    fi
+
+    [ "${NEED_FIX}" = "1" ] || continue
+    rm -f "${DST_CARD}" 2>/dev/null
+    if [ -f "${SRC_CARD}" ] && [ ! -L "${SRC_CARD}" ]; then
+      cp -f "${SRC_CARD}" "${DST_CARD}" 2>/dev/null || true
+    elif [ -L "${SRC_CARD}" ]; then
+      TMP="${DST_CARD}.seed.$$"
+      if cp -f "${SRC_CARD}" "${TMP}" 2>/dev/null && mv -f "${TMP}" "${DST_CARD}" 2>/dev/null; then
+        :
+      else
+        rm -f "${TMP}" 2>/dev/null
+      fi
+    fi
+    [ ! -e "${DST_CARD}" ] && [ -f "${BAK}" ] && cp -f "${BAK}" "${DST_CARD}" 2>/dev/null || true
+
+    if [ -L "${DST_CARD}" ]; then
+      TARGET="$(readlink "${DST_CARD}" 2>/dev/null)"
+      case "${TARGET}" in
+        "${DST_CARD}"|/var/volatile/datatmp/*/.pcsx/memcards/*.mcd)
+          TMP="${DST_CARD}.mat.$$"
+          if cp -f "${DST_CARD}" "${TMP}" 2>/dev/null && rm -f "${DST_CARD}" && mv "${TMP}" "${DST_CARD}" 2>/dev/null; then
+            :
+          else
+            rm -f "${TMP}" 2>/dev/null
+            rm -f "${DST_CARD}" 2>/dev/null
+            [ -f "${SRC_CARD}" ] && [ ! -L "${SRC_CARD}" ] && cp -f "${SRC_CARD}" "${DST_CARD}" 2>/dev/null || true
+            [ ! -e "${DST_CARD}" ] && [ -f "${BAK}" ] && cp -f "${BAK}" "${DST_CARD}" 2>/dev/null || true
+          fi
+          ;;
+      esac
+    fi
+
+    [ -f "${DST_CARD}" ] && repaired=$((repaired + 1))
+  done
+
+  [ "${repaired}" -gt 0 ] && echo "[PROJECT ERIS](INTERCEPT)(INFO) repaired shadow memcards for game ${GAME_ID} (src ${SRC_ID})"
+}
+
+### START INTERCEPT SCRIPT ####################################################
+# This should be launched directly from ui_menu by
+# substituing the sPcsxExecPath in /usr/sony/share/data/preferences/system.pre
+# with the path to this script
+###############################################################################
+echo "[PROJECT ERIS](INTERCEPT)(INFO) Starting PS Classic Intercept"
+### CHECK FOR LAUNCH SCRIPT ###################################################
+# If launch script exists run it instead of pcsx/RA
+if [ -f "/data/AppData/sony/title/launch.sh" ]; then
+  echo "[PROJECT ERIS](INTERCEPT)(INFO) launch.sh exists"
+  TITLE_PATH=$(readlink -fn /data/AppData/sony/title/)
+  ln -sf "${TITLE_PATH}" "/var/volatile/launchtmp"
+  echo "launch_launcher_command" > "/tmp/launchfilecommand"
+  touch "/data/power/prepare_suspend"
+  exit 0
+fi
+if [ "$#" -ge 1 ]; then
+  echo "[PROJECT ERIS](INTERCEPT)(INFO) There are $# parameters:"
+  echo "[PROJECT ERIS](INTERCEPT)(INFO) $*"
+else
+  echo "[PROJECT ERIS](INTERCEPT)(INFO) There are no parameters"
+fi
+echo "[PROJECT ERIS](INTERCEPT)(INFO) The current working directory: ${PWD}"
+suspend_ui_menu
+# auto_dimmer causes audio glitching in RetroArch
+killall -s TERM "auto_dimmer" &> "/dev/null"
+INTERCEPT_COMMAND=""
+FOUND_CDFILE=false
+RA_ARGS=""
+RA_CORE="pcsx_rearmed_libretro.so"
+RA_GAME=false
+disc_launcher_MODE=false
+RESUME_FORCE_disc_launcher=false
+# Loop through each ARGument to pull out information relating to which game is being loaded
+# and whether this is a Save State load
+START_ARG=$(date +%s%N)
+for ARG in "$@"
+do
+  if [ "${FOUND_CDFILE}" = true ]; then
+    INTERCEPT_GAME_PATH="${ARG}"
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) Game full path: ${INTERCEPT_GAME_PATH}"
+    INTERCEPT_GAME_DIR="${ARG%/*}/"
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) Game directory: ${INTERCEPT_GAME_DIR}"
+    INTERCEPT_GAME_ID="${ARG##*/}"
+    INTERCEPT_GAME_ID="${INTERCEPT_GAME_ID%.*}"
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) Game ID: ${INTERCEPT_GAME_ID}"
+    INTERCEPT_GAME_EXT="${ARG##*.}"
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) Game extension: ${INTERCEPT_GAME_EXT}"
+        ##################################################################
+    # SPECIAL ROUTE: disc_launcher.cue from the stock UI
+    ##################################################################
+    if [ "${INTERCEPT_SAVE_STATE}" = true ] && [ "${INTERCEPT_GAME_ID}" != "disc_launcher" ]; then
+      if echo "${INTERCEPT_GAME_ID}" | grep -qE '^drive[0-9]+$'; then
+        RESUME_ID="$(sed -n '2p' /data/AppData/sony/pcsx/.pcsx/filename.txt 2>/dev/null | tr -d '\r\n')"
+        if [ "${RESUME_ID}" = "disc_launcher" ] || [ -f "/data/AppData/sony/pcsx/.pcsx/sstates/disc_launcher.000" ] || [ -f "/data/AppData/sony/pcsx/.pcsx/sstates/disc_launcher.000.res" ]; then
+          RESUME_FORCE_disc_launcher=true
+          INTERCEPT_GAME_ID="disc_launcher"
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) Save-state resume indicates disc_launcher (forcing disc_launcher route)"
+        fi
+      fi
+    fi
+    if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ] || [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+      echo "[PROJECT ERIS](INTERCEPT)(INFO) Detected special disc_launcher route (DiscProject core)"
+      # Tell intercept we want RetroArch from stock UI
+      LAUNCH_RA_FROM_STOCK_UI="1"
+      RA_GAME=false
+
+      # Use DiscProject core instead of normal pcsx_rearmed
+      RA_CORE="pcsx_rearmed_discproject.so"
+
+      # Make RetroArch behave like internal stock-UI launches
+      RA_ARGS="--appendconfig /media/project_eris/opt/retroarch/config/retroarch/ra-game-cdrom.cfg"
+
+      # Shared memory card pool: leave INTERCEPT_GAME_ID as 'disc_launcher'
+      # so all discs started via this route share the same card.
+
+      # Important: RetroArch should see cdrom://driveX.cue (set later once /dev/srX is known)
+      INTERCEPT_GAME_PATH="cdrom://disc_launcher.cue"
+      INTERCEPT_GAME_EXT="cue"
+
+      # Mark that we need to load modules + mount the physical disc later
+      disc_launcher_MODE=true
+    fi
+    if [ "${INTERCEPT_GAME_ID%%-*}" = "RA" ]; then	
+	  REQUESTED_CORE_FILE=($(ls /data/AppData/sony/title/RACORE-* 2>/dev/null))	
+	  if [ "${#REQUESTED_CORE_FILE[@]}" != "1" ]; then	
+		echo "[INTERCEPT](ERROR) Cannot find RA Cores"	
+		resume_ui_menu	
+		exit 1	
+	  fi
+	  REQUESTED_CORE_FILE="${REQUESTED_CORE_FILE[0]}"	
+	  source "${REQUESTED_CORE_FILE}"
+	  REQUESTED_CORE_FILE="${REQUESTED_CORE_FILE##*/}"	
+	  RA_CORE="${REQUESTED_CORE_FILE##*-}"
+	  RA_GAME=true	
+	  RA_ARGS="--appendconfig /media/project_eris/opt/retroarch/config/retroarch/ra-game.cfg"	
+	  echo "[PROJECT ERIS](INTERCEPT)(INFO) Detected RA Game"	
+	  echo "[PROJECT ERIS](INTERCEPT)(INFO) Requested RetroArch Core is $ra_core"
+	fi
+    # Check if the game exists in an alternative format
+    # The game path always has .cue appened to the BASENAME field of the DISC table in regional.db
+    # EXCEPT when the game is launched from a Save State. In this case the Game Path is determined from
+    # the first line of filename.txt.res in the games PCSX data directory (ie. /data/AppData/sony/pcsx/1/.pcsx/filename.txt.res)
+    if [ "$INTERCEPT_SAVE_STATE" = false ] && [ "${disc_launcher_MODE}" = false ]; then	
+      if [ "${RA_GAME}" = true ]; then	
+        INTERCEPT_GAME_PATH="${ARG%.*}"	
+        INTERCEPT_GAME_ID="${INTERCEPT_GAME_ID%.*}"	
+        INTERCEPT_GAME_EXT="${INTERCEPT_GAME_PATH##*.}"	
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) RA Game full path: ${INTERCEPT_GAME_PATH}"	
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) RA Game ID: ${INTERCEPT_GAME_ID}"	
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) RA Game extension: ${INTERCEPT_GAME_EXT}"	
+        break	
+      fi
+      START_ALT=$(date +%s%N)
+      for f in "${INTERCEPT_FILE_FORMATS[@]}"; do
+        if [ "${LAUNCH_RA_FROM_STOCK_UI}" = "0" ] && [ "${f}" = "m3u" ]; then
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) Ignoring m3u game format as Stock PCSX is the current emulator"
+          continue
+        fi
+        F_UPPER=$(echo ${f} | tr a-z A-Z)
+        if [ -f "${ARG%.cue}.${f}" ]; then
+          INTERCEPT_GAME_ALTERNATIVE_PATH="${ARG%.cue}.${f}"
+        elif [ -f "${ARG%.cue}.${F_UPPER}" ]; then
+          INTERCEPT_GAME_ALTERNATIVE_PATH="${ARG%.cue}.${F_UPPER}"
+          f=${F_UPPER}
+        fi
+        if [ ! -z "${INTERCEPT_GAME_ALTERNATIVE_PATH}" ]; then
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) Alternative game format exists (${f}), this will be used instead of the .cue"
+          ARG="${INTERCEPT_GAME_ALTERNATIVE_PATH}"
+          INTERCEPT_GAME_PATH="${ARG}"
+          INTERCEPT_GAME_EXT="${f}"
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) New Game full path: ${INTERCEPT_GAME_PATH}"
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) New Game extension: ${INTERCEPT_GAME_EXT}"
+          break
+        fi
+      done
+      END_ALT=$(date +%s%N)
+      echo "[PROJECT ERIS](INTERCEPT)(PROFILE) finding alternative game formats took: $(((END_ALT-START_ALT)/1000000))ms to execute"
+    fi
+    FOUND_CDFILE=false
+    continue
+  fi
+  case ${ARG} in
+    -cdfile)
+      FOUND_CDFILE=true
+      continue
+      ;;
+     -load)
+      echo "[PROJECT ERIS](INTERCEPT)(INFO) This is a Save State load"
+      INTERCEPT_SAVE_STATE=true
+      ;;
+  esac
+  #   Build the new parameters for PCSX
+  INTERCEPT_COMMAND="${INTERCEPT_COMMAND} ${ARG}"
+done
+if [ "${RA_GAME}" = false ] && [ "${INTERCEPT_GAME_EXT}" = "chd" ]; then
+	echo "[PROJECT ERIS](INTERCEPT)(INFO) chd found, force LAUNCH_RA_FROM_STOCK_UI"	
+	LAUNCH_RA_FROM_STOCK_UI="1"
+fi
+END_ARG=$(date +%s%N)
+echo "[PROJECT ERIS](INTERCEPT)(PROFILE) extracting Arguments took: $(((END_ARG-START_ARG)/1000000))ms to execute"
+repair_active_shadow_memcards "${INTERCEPT_GAME_ID}"
+if [ "${LAUNCH_RA_FROM_STOCK_UI}" = "1" ] || [ "${RA_GAME}" = true ] || \
+   [ "${disc_launcher_MODE}" = true ] || \
+   [ "${INTERCEPT_GAME_PATH#cdrom://}" != "${INTERCEPT_GAME_PATH}" ]; then
+
+  ##################################################################
+  # SPECIAL ROUTE MOUNT LOGIC FOR disc_launcher
+  ##################################################################
+    if [ "${disc_launcher_MODE}" = true ]; then
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: preparing physical disc"
+
+    MOUNT_PT="/tmp/cdrom"
+    mkdir -p "${MOUNT_PT}"
+
+    # Track whether we reused an existing mount (disc swap edge-case handling)
+    REUSED_MOUNT=0
+
+    # Load required CD/DVD modules if not already loaded
+    if ! lsmod | grep -q '^cdrom'; then
+      insmod "${DISC_LAUNCHER_MODULES_DIR}/cdrom.ko" 2>/dev/null
+    fi
+    if ! lsmod | grep -q '^sg '; then
+      insmod "${DISC_LAUNCHER_MODULES_DIR}/sg.ko" 2>/dev/null
+    fi
+    if ! lsmod | grep -q '^sr_mod'; then
+      insmod "${DISC_LAUNCHER_MODULES_DIR}/sr_mod.ko" 2>/dev/null
+    fi
+
+    # Find any available /dev/srX drive (sr0, sr1, ...)
+    TRIES=30
+    i=0
+    CDROM_DEV=""
+
+    while [ "${i}" -lt "${TRIES}" ]; do
+      CDROM_DEV="$(find_any_cdrom_dev)"
+      if [ -n "${CDROM_DEV}" ] && [ -b "${CDROM_DEV}" ]; then
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: using ${CDROM_DEV}"
+        break
+      fi
+      i=$((i+1))
+      sleep 1
+    done
+
+    if [ -z "${CDROM_DEV}" ] || [ ! -b "${CDROM_DEV}" ]; then
+      echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: no /dev/srX device found, returning to menu"
+      show_disc_launcher_error_screen
+      resume_ui_menu
+      echo -n 1 > "/data/power/disable"
+      exit 0
+    fi
+
+    # Map /dev/srX -> cdrom://driveX.cue using by-path order (matches RA drive enumeration)
+    DRIVE_INDEX="$(resolve_cdrom_drive_index "${CDROM_DEV}")"
+    if [ -n "${DRIVE_INDEX}" ]; then
+      INTERCEPT_GAME_PATH="cdrom://drive${DRIVE_INDEX}.cue"
+      disc_launcher_RA_ID="drive${DRIVE_INDEX}"
+      echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: mapped ${CDROM_DEV} -> ${INTERCEPT_GAME_PATH} (scsi index)"
+    else
+      echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: scsi mapping failed for ${CDROM_DEV}"
+      show_disc_launcher_error_screen
+      resume_ui_menu
+      echo -n 1 > "/data/power/disable"
+      exit 0
+    fi
+
+    # Remember last-used drive node so we can detect /dev/srX changes
+    LAST_DEV_FILE="/var/volatile/disc_launcher_cdrom_dev"
+    LAST_CDROM_DEV=""
+    if [ -f "${LAST_DEV_FILE}" ]; then
+      LAST_CDROM_DEV="$(cat "${LAST_DEV_FILE}" 2>/dev/null)"
+    fi
+
+    # If already mounted, decide whether to reuse or clear stale mount
+    if grep -q " ${MOUNT_PT} " /proc/mounts 2>/dev/null; then
+      if [ -n "${LAST_CDROM_DEV}" ] && [ "${LAST_CDROM_DEV}" != "${CDROM_DEV}" ]; then
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: device changed from ${LAST_CDROM_DEV} to ${CDROM_DEV}, unmounting stale ${MOUNT_PT}"
+        umount "${MOUNT_PT}" 2>/dev/null
+      else
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: ${MOUNT_PT} already mounted on same device, reusing existing mount"
+        REUSED_MOUNT=1
+      fi
+    fi
+
+    # If not currently mounted, mount the disc (read-only ISO9660)
+    if ! grep -q " ${MOUNT_PT} " /proc/mounts 2>/dev/null; then
+      MOUNT_TRIES=30
+      j=0
+      MOUNT_OK=0
+      while [ "${j}" -lt "${MOUNT_TRIES}" ]; do
+        if mount -r -t iso9660 "${CDROM_DEV}" "${MOUNT_PT}" 2>/dev/null; then
+          MOUNT_OK=1
+          break
+        fi
+        j=$((j+1))
+        sleep 1
+      done
+
+      if [ "${MOUNT_OK}" -ne 1 ]; then
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: ISO9660 mount failed, probing raw device"
+
+        # Spin up / probe the device, but always present a single invalid-disc UI.
+        if dd if="${CDROM_DEV}" of=/dev/null bs=2048 count=1 2>/dev/null; then
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: raw read OK but ISO9660 mount failed, treating as invalid/non-PS1 disc"
+        else
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: raw read failed or no media, treating as invalid/non-PS1 disc"
+        fi
+
+        resume_ui_menu
+        show_disc_launcher_invalid_disc_screen
+        echo -n 1 > "/data/power/disable"
+        exit 0
+      fi
+    fi
+    
+    ##################################################################
+    # PlayStation disc sanity check
+    # Step 1: wait for *any* filesystem contents to appear
+    #   - If the directory never shows entries -> "no disc inserted"
+    # Step 2: wait for a valid PS1 SYSTEM.CNF to appear
+    ##################################################################
+    FS_READY=0
+    FS_TRIES=30   # total "disc spin-up / TOC" window in seconds
+    k=0
+
+    while [ "${k}" -lt "${FS_TRIES}" ]; do
+      # Only count it as "ready" if there is at least one entry in the root
+      CONTENT_PRESENT="$(ls -A "${MOUNT_PT}" 2>/dev/null | head -n 1)"
+      if [ -n "${CONTENT_PRESENT}" ]; then
+        FS_READY=1
+        break
+      fi
+      k=$((k+1))
+      sleep 1
+    done
+
+    if [ "${FS_READY}" -ne 1 ]; then
+      echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: filesystem never showed any contents after mount"
+
+      # Clean up mount point so media changes are seen correctly next time
+      umount "${MOUNT_PT}" 2>/dev/null
+      rm -rf "${MOUNT_PT}" 2>/dev/null
+
+      resume_ui_menu
+
+      if [ "${REUSED_MOUNT}" -eq 1 ]; then
+        # Reused mount went stale; probe device for logging only, UI is always invalid-disc.
+        if dd if="${CDROM_DEV}" of=/dev/null bs=2048 count=1 2>/dev/null; then
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: reused mount went stale but raw read OK, treating as invalid/non-PS1 disc"
+        else
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: reused mount went stale and raw read failed or no media, treating as invalid/non-PS1 disc"
+        fi
+      else
+        echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: no readable filesystem after fresh mount, treating as invalid/non-PS1 disc"
+      fi
+
+      show_disc_launcher_invalid_disc_screen
+      echo -n 1 > "/data/power/disable"
+      exit 0
+    fi
+
+    # Step 2: explicitly wait for SYSTEM.CNF to appear at the root
+    SYSTEM_CNF=""
+    SCAN_TRIES=30
+    k=0
+
+    while [ "${k}" -lt "${SCAN_TRIES}" ]; do
+      SYSTEM_CNF="$(find "${MOUNT_PT}" -maxdepth 1 -iname 'system.cnf' 2>/dev/null | head -n 1)"
+      if [ -n "${SYSTEM_CNF}" ]; then
+        break
+      fi
+      k=$((k+1))
+      sleep 1
+    done
+
+    if [ -z "${SYSTEM_CNF}" ]; then
+      echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: no SYSTEM.CNF on disc after scan window, treating as invalid PlayStation disc"
+      show_disc_launcher_invalid_disc_screen
+      umount "${MOUNT_PT}" 2>/dev/null
+      rm -rf "${MOUNT_PT}" 2>/dev/null
+      resume_ui_menu
+      echo -n 1 > "/data/power/disable"
+      exit 0
+    fi
+
+    # Obvious PS2 signatures: BOOT2 and/or cdrom0:
+    if grep -qi 'BOOT2 *= *cdrom0:' "${SYSTEM_CNF}" 2>/dev/null || \
+       grep -qi 'BOOT *= *cdrom0:' "${SYSTEM_CNF}" 2>/dev/null; then
+      echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: detected PS2-style BOOT entry, treating as invalid PlayStation disc"
+      show_disc_launcher_invalid_disc_screen
+      umount "${MOUNT_PT}" 2>/dev/null
+      rm -rf "${MOUNT_PT}" 2>/dev/null
+      resume_ui_menu
+      echo -n 1 > "/data/power/disable"
+      exit 0
+    fi
+
+    # Require a BOOT = cdrom: line (typical PS1 SYSTEM.CNF)
+    # Edge-case: on reused mount after a disc swap, the mount can be stale for one specific slow disc.
+    # Simple fix: one-time full remount (umount + delete /tmp/cdrom + remount) then re-run the same checks.
+    if ! grep -qi 'BOOT *= *cdrom:' "${SYSTEM_CNF}" 2>/dev/null; then
+      if [ "${REUSED_MOUNT}" -eq 1 ]; then
+        echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: missing PS1 BOOT line on reused mount, forcing one full remount and retry"
+
+        umount "${MOUNT_PT}" 2>/dev/null
+        rm -rf "${MOUNT_PT}" 2>/dev/null
+        mkdir -p "${MOUNT_PT}"
+
+        # Ensure MOUNT_TRIES exists (normally set earlier)
+        if [ -z "${MOUNT_TRIES}" ]; then
+          MOUNT_TRIES=30
+        fi
+
+        REMOUNT_OK=0
+        j=0
+        while [ "${j}" -lt "${MOUNT_TRIES}" ]; do
+          if mount -r -t iso9660 "${CDROM_DEV}" "${MOUNT_PT}" 2>/dev/null; then
+            REMOUNT_OK=1
+            break
+          fi
+          j=$((j+1))
+          sleep 1
+        done
+
+        if [ "${REMOUNT_OK}" -eq 1 ]; then
+          # Re-run Step 1: wait for *any* filesystem contents to appear
+          FS_READY=0
+          k=0
+          while [ "${k}" -lt "${FS_TRIES}" ]; do
+            CONTENT_PRESENT="$(ls -A "${MOUNT_PT}" 2>/dev/null | head -n 1)"
+            if [ -n "${CONTENT_PRESENT}" ]; then
+              FS_READY=1
+              break
+            fi
+            k=$((k+1))
+            sleep 1
+          done
+
+          if [ "${FS_READY}" -ne 1 ]; then
+            echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: filesystem never showed any contents after remount"
+            show_disc_launcher_invalid_disc_screen
+            umount "${MOUNT_PT}" 2>/dev/null
+            rm -rf "${MOUNT_PT}" 2>/dev/null
+            resume_ui_menu
+            echo -n 1 > "/data/power/disable"
+            exit 0
+          fi
+
+          # Re-run Step 2: wait for SYSTEM.CNF to appear at the root
+          SYSTEM_CNF=""
+          k=0
+          while [ "${k}" -lt "${SCAN_TRIES}" ]; do
+            SYSTEM_CNF="$(find "${MOUNT_PT}" -maxdepth 1 -iname 'system.cnf' 2>/dev/null | head -n 1)"
+            if [ -n "${SYSTEM_CNF}" ]; then
+              break
+            fi
+            k=$((k+1))
+            sleep 1
+          done
+
+          if [ -z "${SYSTEM_CNF}" ]; then
+            echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: no SYSTEM.CNF on disc after remount scan window, treating as invalid PlayStation disc"
+            show_disc_launcher_invalid_disc_screen
+            umount "${MOUNT_PT}" 2>/dev/null
+            rm -rf "${MOUNT_PT}" 2>/dev/null
+            resume_ui_menu
+            echo -n 1 > "/data/power/disable"
+            exit 0
+          fi
+
+          # Re-run PS2 signature check after remount
+          if grep -qi 'BOOT2 *= *cdrom0:' "${SYSTEM_CNF}" 2>/dev/null || \
+             grep -qi 'BOOT *= *cdrom0:' "${SYSTEM_CNF}" 2>/dev/null; then
+            echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: detected PS2-style BOOT entry after remount, treating as invalid PlayStation disc"
+            show_disc_launcher_invalid_disc_screen
+            umount "${MOUNT_PT}" 2>/dev/null
+            rm -rf "${MOUNT_PT}" 2>/dev/null
+            resume_ui_menu
+            echo -n 1 > "/data/power/disable"
+            exit 0
+          fi
+        fi
+      fi
+
+      # Final BOOT check (after optional one-time remount retry)
+      if ! grep -qi 'BOOT *= *cdrom:' "${SYSTEM_CNF}" 2>/dev/null; then
+        echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: SYSTEM.CNF has no valid PS1 BOOT line, treating as invalid PlayStation disc"
+        show_disc_launcher_invalid_disc_screen
+        umount "${MOUNT_PT}" 2>/dev/null
+        rm -rf "${MOUNT_PT}" 2>/dev/null
+        resume_ui_menu
+        echo -n 1 > "/data/power/disable"
+        exit 0
+      fi
+    fi
+
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: disc passed SYSTEM.CNF checks at ${MOUNT_PT}, continuing to RetroArch"
+
+# --- START: disc_launcher CURRENT DISC SERIAL SNAPSHOT (/tmp) ---
+# Store ONLY the disc serial (1-line text) into a stable temp location so later logic
+# (save-state confirm pipeline) can use it even if /tmp/cdrom becomes stale.
+disc_launcher_TMP_CNF="/tmp/disc_launcher.system.cnf.current"
+
+extract_disc_launcher_serial_from_cnf() {
+  # Extracts serial from SYSTEM.CNF BOOT line, normalizes to UPPERCASE.
+  # Handles paths like: BOOT = cdrom:\SLES_024.70;1  OR cdrom:\SLUS_123.45\GAME.EXE;1
+  local cnf="$1"
+  local s=""
+
+  [ -f "$cnf" ] || return 1
+
+  # Prefer BOOT line parsing
+  s="$(grep -i '^BOOT' "$cnf" 2>/dev/null | head -n 1 \
+      | sed -e 's/.*cdrom:[\\\/]*//I' -e 's/;.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+  # If BOOT points to a path, keep only the first component / base token
+  s="${s##*/}"
+  s="${s##*\\}"
+
+  # Fallback: pull first match like SLES_024.70 / SLUS_123.45 / SCUS_123.45 etc
+  if [ -z "$s" ]; then
+    s="$(grep -oEi '[A-Z]{4}_[0-9]{3}\.[0-9]{2}' "$cnf" 2>/dev/null | head -n 1)"
+  fi
+
+  # Normalize
+  s="$(echo "$s" | tr 'a-z' 'A-Z' | tr -d '\r\n ' )"
+
+  [ -n "$s" ] || return 1
+  echo "$s"
+  return 0
+}
+
+# Ensure SYSTEM_CNF is populated (case-insensitive)
+if [ -z "${SYSTEM_CNF}" ]; then
+  SYSTEM_CNF="$(find "${MOUNT_PT}" -maxdepth 1 -iname 'system.cnf' 2>/dev/null | head -n 1)"
+fi
+
+if [ -n "${SYSTEM_CNF}" ] && [ -f "${SYSTEM_CNF}" ]; then
+  CUR_SERIAL="$(extract_disc_launcher_serial_from_cnf "${SYSTEM_CNF}")"
+  if [ -n "${CUR_SERIAL}" ]; then
+    TMP_CUR="${disc_launcher_TMP_CNF}.tmp.$$"
+    echo "${CUR_SERIAL}" > "${TMP_CUR}" 2>/dev/null
+    sync
+    mv -f "${TMP_CUR}" "${disc_launcher_TMP_CNF}" 2>/dev/null
+    sync
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: snapshotted DISC SERIAL to ${disc_launcher_TMP_CNF} (${CUR_SERIAL})"
+  else
+    echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: could not extract DISC SERIAL from SYSTEM.CNF at ${MOUNT_PT}"
+  fi
+else
+  echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: could not read SYSTEM.CNF (not found) at ${MOUNT_PT}"
+fi
+# --- END: disc_launcher CURRENT DISC SERIAL SNAPSHOT (/tmp) ---
+
+# --- START: disc_launcher SAVE-STATE DISC CHECK (resume-only, no unmount) ---
+if [ "${INTERCEPT_SAVE_STATE}" = true ] && [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+  # Stored reference copied when the savestate was confirmed/converted by the UI.
+  # NOTE: This file now contains ONLY the DISC SERIAL (1-line text), not full SYSTEM.CNF.
+  disc_launcher_REF_CNF="/data/AppData/sony/pcsx/.pcsx/sstates/disc_launcher.system.cnf"
+  disc_launcher_TMP_CNF="/tmp/disc_launcher.system.cnf.current"
+
+  # Ensure SYSTEM_CNF is available (for extracting current serial)
+  if [ -z "${SYSTEM_CNF}" ]; then
+    SYSTEM_CNF="$(find "${MOUNT_PT}" -maxdepth 1 -iname 'system.cnf' 2>/dev/null | head -n 1)"
+  fi
+
+  # Wait briefly for reference serial file to appear (background capture may still be finishing)
+  WAIT_REF=0
+  while [ ! -f "${disc_launcher_REF_CNF}" ] && [ $WAIT_REF -lt 80 ]; do
+    usleep 100000  # 0.1s
+    WAIT_REF=$((WAIT_REF + 1))
+  done
+
+  # Re-find SYSTEM.CNF just in case
+  if [ -z "${SYSTEM_CNF}" ]; then
+    SYSTEM_CNF="$(find "${MOUNT_PT}" -maxdepth 1 -iname 'system.cnf' 2>/dev/null | head -n 1)"
+  fi
+
+  # Ensure a current serial snapshot exists before comparing (resume can race /tmp creation).
+  if [ ! -f "${disc_launcher_TMP_CNF}" ] && [ -n "${SYSTEM_CNF}" ] && [ -f "${SYSTEM_CNF}" ]; then
+    CUR_SERIAL="$(extract_disc_launcher_serial_from_cnf "${SYSTEM_CNF}" 2>/dev/null | tr 'a-z' 'A-Z' | tr -d '\r\n ' )"
+    if [ -n "${CUR_SERIAL}" ]; then
+      TMP_CUR="${disc_launcher_TMP_CNF}.tmp.$$"
+      echo "${CUR_SERIAL}" > "${TMP_CUR}" 2>/dev/null
+      sync
+      mv -f "${TMP_CUR}" "${disc_launcher_TMP_CNF}" 2>/dev/null
+      sync
+      echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: created missing DISC SERIAL snapshot (${CUR_SERIAL}) before savestate check"
+    fi
+  fi
+
+  if [ -f "${disc_launcher_REF_CNF}" ] && [ -n "${SYSTEM_CNF}" ] && [ -f "${SYSTEM_CNF}" ]; then
+    REF_SERIAL="$(cat "${disc_launcher_REF_CNF}" 2>/dev/null | tr 'a-z' 'A-Z' | tr -d '\r\n ' )"
+    CUR_SERIAL="$(extract_disc_launcher_serial_from_cnf "${SYSTEM_CNF}" 2>/dev/null | tr 'a-z' 'A-Z' | tr -d '\r\n ' )"
+
+    if [ -n "${REF_SERIAL}" ] && [ -n "${CUR_SERIAL}" ]; then
+      if [ "${REF_SERIAL}" != "${CUR_SERIAL}" ]; then
+        echo "[PROJECT ERIS](INTERCEPT)(ERROR) disc_launcher: wrong disc for savestate resume (SERIAL mismatch: ref=${REF_SERIAL}, cur=${CUR_SERIAL})"
+        # IMPORTANT: do NOT umount or delete ${MOUNT_PT}. Let the user swap quickly.
+        resume_ui_menu
+        show_disc_launcher_wrong_disc_screen
+        echo -n 1 > "/data/power/disable"
+        exit 0
+      fi
+      echo "[PROJECT ERIS](INTERCEPT)(INFO) disc_launcher: savestate resume disc check passed (SERIAL ${CUR_SERIAL})"
+    else
+      echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: savestate resume disc check skipped (empty serial ref/cur)"
+    fi
+  else
+    echo "[PROJECT ERIS](INTERCEPT)(WARN) disc_launcher: savestate resume disc check skipped (ref or SYSTEM.CNF still missing after wait)"
+  fi
+fi
+# --- END: disc_launcher SAVE-STATE DISC CHECK (resume-only, no unmount) ---
+    # Remember which /dev/srX node was valid for this run (for hot-swap reuse)
+    if [ -n "${CDROM_DEV}" ]; then
+      echo "${CDROM_DEV}" > /var/volatile/disc_launcher_cdrom_dev
+    fi
+  fi
+  ##################################################################
+
+  if [ "${DISPLAY_RA_LOADING_SCREEN}" = "1" ]; then
+    # Display Loading Screen
+    if [ -f "${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png" ]; then
+      "${PROJECT_ERIS_PATH}/bin/sdl_display" "${THEMES_PATH}/${SELECTED_THEME}/menu_files/ra_loading.png" &
+      delayed_sdl_display_kill &
+    elif [ -f "${THEMES_PATH}/stock/menu_files/ra_loading.png" ]; then
+      "${PROJECT_ERIS_PATH}/bin/sdl_display" "${THEMES_PATH}/stock/menu_files/ra_loading.png" &
+      delayed_sdl_display_kill &
+    fi
+  fi
+  if [ "${RA_GAME}" = false ]; then
+    echo "[PROJECT ERIS](INTERCEPT)(INFO) RetroArch is enabled as the emulator"
+    # Swap stock multi disc game path to an .m3u for better disc swap support in RetroArch
+    case "${INTERCEPT_GAME_ID}" in
+      SCUS-94163|SLPM-86114|SLPS-01057|SLPS-01230|SLUS-00594)
+        if [ "${INTERCEPT_GAME_EXT}" = "cue" ] && [ "${INTERCEPT_SAVE_STATE}" = false ] ; then
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) This is a stock multi disc game with no .m3u. An .m3u is needed for the best multi disc experience within RetroArch"
+          if [ -f "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/retroarch/title/${INTERCEPT_GAME_ID}.m3u" ]; then
+            INTERCEPT_GAME_PATH="${PROJECT_ERIS_PATH}/etc/project_eris/SUP/retroarch/title/${INTERCEPT_GAME_ID}.m3u"
+            INTERCEPT_GAME_EXT="m3u"
+            echo "[PROJECT ERIS](INTERCEPT)(INFO) New Game full path: ${INTERCEPT_GAME_PATH}"
+            echo "[PROJECT ERIS](INTERCEPT)(INFO) New Game extension: ${INTERCEPT_GAME_EXT}"
+          else
+            echo "[PROJECT ERIS](INTERCEPT)(ERROR) an .m3u does not exist at ${PROJECT_ERIS_PATH}/etc/project_eris/SUP/retroarch/title/${INTERCEPT_GAME_ID}.m3u"
+          fi 
+        fi
+        ;;
+    esac
+  fi
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](INTERCEPT)(PROFILE) up to launching RetroArch took: $(((END-START)/1000000))ms to execute"
+  echo -n 2 > "/data/power/disable"
+  if [ ! -z "${RA_GAMEPATH}" ]; then
+	echo "[PROJECT ERIS](INTERCEPT)(INFO) RA Create symbolic link: ${INTERCEPT_GAME_PATH} -> ${RA_GAMEPATH}"
+	INTERCEPT_GAME_PATH="${RA_GAMEPATH}"
+	EXTRAINDEX=0
+	while [ ! -z "${RA_EXTRA[$EXTRAINDEX]}" ]; do
+	  ln -sf "${RA_EXTRA[$EXTRAINDEX]}" "${INTERCEPT_GAME_DIR}${RA_EXTRA[$EXTRAINDEX]##*/}"
+	  EXTRAINDEX=$(( $EXTRAINDEX + 1 ))
+	done
+  fi
+  [ "${RA_GAME}" = false ] && link_ra_memory_cards
+
+  # --- START: disc_launcher CONFIG APPEND FIX (Final Clean) ---
+  
+  if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+      # FORCE CONFIG LOAD (Ensures savestate_auto_save="false" is always applied for cold boots)
+      CONFIG_FILE="/media/project_eris/etc/project_eris/cfg/ra-game-cdrom.cfg" 
+      if [ -f "${CONFIG_FILE}" ]; then
+          RA_ARGS="${RA_ARGS} --config ${CONFIG_FILE}"
+          echo "[PROJECT ERIS](INTERCEPT)(INFO) Appending config to RA_ARGS for disc_launcher launches."
+      fi
+  fi
+  # --- END: disc_launcher CONFIG APPEND FIX (Final Clean) ---
+  
+  launch_retroarch_from_StockUI "${RA_CORE}" "${RA_ARGS}"
+
+  exit_checkSaveState
+  if [ ! -z "${RA_GAMEPATH}" ]; then
+	#echo "[PROJECT ERIS](INTERCEPT)(INFO) remove RA symbolic link"
+	#rm -f "${INTERCEPT_GAME_PATH}"
+	EXTRAINDEX=0
+	while [ ! -z "${RA_EXTRA[$EXTRAINDEX]}" ]; do
+	  rm -f "${INTERCEPT_GAME_DIR}${RA_EXTRA[$EXTRAINDEX]##*/}"
+	  EXTRAINDEX=$(( $EXTRAINDEX + 1 ))
+	done
+  fi
+  resume_ui_menu
+  echo -n 1 > "/data/power/disable"
+  exit 0
+fi
+echo "[PROJECT ERIS](INTERCEPT)(INFO) Launching ${INTERCEPT_PCSX_PATH} ${INTERCEPT_COMMAND} -cdfile ${INTERCEPT_GAME_PATH}"
+END=$(date +%s%N)
+echo "[PROJECT ERIS](INTERCEPT)(PROFILE) up to launching stock pcsx took: $(((END-START)/1000000))ms to execute"
+LD_PRELOAD="${PROJECT_ERIS_PATH}/lib/sdl_remap_arm.so" "${INTERCEPT_PCSX_PATH}" ${INTERCEPT_COMMAND} -cdfile "${INTERCEPT_GAME_PATH}"
+resume_ui_menu
+# Exit returning the pcsx exit code
+exit $?

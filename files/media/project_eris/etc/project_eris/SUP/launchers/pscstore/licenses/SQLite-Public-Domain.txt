@@ -1,0 +1,14 @@
+SQLite Notice
+=============
+
+SQLite is in the public domain.
+
+Official copyright and public-domain notice:
+https://sqlite.org/copyright.html
+
+PSC Store links against SQLite/libsqlite3 for local history/playtime data and
+Project Eris game database lookups. Project Eris function scripts use the
+existing Project Eris-provided sqlite3 command-line tool at
+/media/project_eris/bin/sqlite3 for Project Eris database operations.
+
+PSC Store does not bundle a sqlite3 executable.

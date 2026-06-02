@@ -1,0 +1,1005 @@
+#!/bin/sh
+#
+#  Copyright 2020 ModMyClassic (https://modmyclassic.com/license)
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+###############################################################################
+# Project Eris Function Library - RetroArch
+# ModMyClassic.com / https://discordapp.com/invite/8gygsrw
+###############################################################################
+
+RA_SAVE_PATH="/tmp/ra_save"
+RA_SAVESTATE_PATH="/tmp/ra_savestate"
+
+PSC_UI_TEST_LAUNCHER_DIR="/media/project_eris/etc/project_eris/SUP/launchers/pscstore"
+PSC_DISC_LAUNCHER_ERROR_SCREENS_DIR="${PSC_UI_TEST_LAUNCHER_DIR}/assets/pscdisclauncher-error-screens"
+PSC_HISTORY_DB="/media/project_eris/etc/project_eris/SUP/launchers/pscstore/history.db"
+PSC_HISTORY_LOGGER="${PSC_UI_TEST_LAUNCHER_DIR}/pscstore_logger"
+PSC_TIME_SYNC_FLAG="${PSC_UI_TEST_LAUNCHER_DIR}/time_sync_failed.flag"
+# PSCSTORE_HISTORY_LOGGING_BLOCK_BEGIN
+PSCSTORE_LOG_DIR="${PSCSTORE_LOG_DIR:-/tmp/pscstore_logs}"
+PSC_HISTORY_HOOK_LOG="${PSCSTORE_LOG_DIR}/history_hook.log"
+mkdir -p "${PSCSTORE_LOG_DIR}" 2>/dev/null || true
+# PSCSTORE_HISTORY_LOGGING_BLOCK_END
+PSC_SESSION_META="/tmp/psc_history_session.meta"
+PSC_RA_CONTENT_HISTORY="/media/project_eris/opt/retroarch/config/retroarch/content_history.lpl"
+PSC_LOGGER_LD_LIBRARY_PATH="${PSC_LOGGER_LD_LIBRARY_PATH:-/usr/sony/lib:/usr/lib:/lib:/media/project_eris/lib:/media/project_eris/bin}"
+PSC_MUTE_TOGGLE_SCRIPT="/media/project_eris/etc/project_eris/SUP/scripts/mute_toggle.sh"
+
+if [ -z "${PSC_PCSX_DB_PATH}" ]; then
+  if [ -f "${PSC_UI_TEST_LAUNCHER_DIR}/pcsx_data.db" ]; then
+    PSC_PCSX_DB_PATH="${PSC_UI_TEST_LAUNCHER_DIR}/pcsx_data.db"
+  else
+    PSC_PCSX_DB_PATH="/media/project_eris/opt/psc_transfer_tools/pcsx_data.db"
+  fi
+fi
+
+psc_time_is_sane() {
+  now="$(date -u +%s 2>/dev/null)"
+  [ -n "${now}" ] && [ "${now}" -ge 1577836800 ]
+}
+
+psc_stop_mute_toggle() {
+  for cmdline in /proc/[0-9]*/cmdline; do
+    [ -r "${cmdline}" ] || continue
+    pid="${cmdline%/cmdline}"
+    pid="${pid##*/}"
+    [ "${pid}" = "$$" ] && continue
+    tr '\0' ' ' < "${cmdline}" 2>/dev/null | grep -Fq "${PSC_MUTE_TOGGLE_SCRIPT}" || continue
+    kill "${pid}" 2>/dev/null || true
+  done
+  killall -s TERM "mute_toggle.sh" >/dev/null 2>&1 || true
+}
+
+psc_flag_time_sync_failed() {
+  mkdir -p "${PSC_UI_TEST_LAUNCHER_DIR}" 2>/dev/null || true
+  : > "${PSC_TIME_SYNC_FLAG}" 2>/dev/null || true
+}
+
+psc_sync_time_from_windows_if_needed() {
+  psc_time_is_sane && return 0
+
+  WIN_TIME_HOST="${WIN_TIME_HOST:-169.254.215.1}"
+  WIN_TIME_USER="${WIN_TIME_USER:-Daniel}"
+  WIN_TIME_KEY_SRC="${WIN_TIME_KEY_SRC:-/media/project_eris/etc/project_eris/SUP/keys/win_time_id}"
+  WIN_TIME_KEY_TMP="/tmp/win_time_id.$$"
+  WIN_TIME_KNOWN_HOSTS="/tmp/win_time_known_hosts"
+
+  command -v ssh >/dev/null 2>&1 || return 1
+  [ -f "${WIN_TIME_KEY_SRC}" ] || return 1
+
+  export HOME=/tmp
+  mkdir -p "${HOME}/.ssh" 2>/dev/null || true
+  : > "${WIN_TIME_KNOWN_HOSTS}" 2>/dev/null || true
+
+  umask 077
+  cat "${WIN_TIME_KEY_SRC}" > "${WIN_TIME_KEY_TMP}" 2>/dev/null || return 1
+  chmod 600 "${WIN_TIME_KEY_TMP}" 2>/dev/null || true
+
+  ts="$(ssh -i "${WIN_TIME_KEY_TMP}" \
+    -o BatchMode=yes -o ConnectTimeout=3 \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile="${WIN_TIME_KNOWN_HOSTS}" \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes \
+    "${WIN_TIME_USER}@${WIN_TIME_HOST}" \
+    "powershell.exe -NoProfile -NonInteractive -Command \"[DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss')\"" 2>/dev/null | tr -d '\r')"
+
+  rm -f "${WIN_TIME_KEY_TMP}" 2>/dev/null || true
+
+  case "${ts}" in
+    ????-??-??\ ??:??:??)
+      date -u -s "${ts}" >/dev/null 2>&1 || date -s "${ts}" >/dev/null 2>&1
+      if psc_time_is_sane; then
+        rm -f "${PSC_TIME_SYNC_FLAG}" 2>/dev/null || true
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+  return 1
+}
+
+psc_has_serial_pattern() {
+  # Matches:
+  # - SLES-02605 / SLES02605
+  # - SLES_024.70 (common from "CD-ROM EXE Name")
+  # - SLUS00707
+  echo "$1" | grep -Eiq '[A-Za-z]{4}[-_.]?[0-9]{3}[-_.]?[0-9]{2}'
+}
+
+psc_first_m3u_entry() {
+  m3u="$1"
+  [ -f "${m3u}" ] || return 1
+  awk 'NF && $0 !~ /^[[:space:]]*#/ { print; exit }' "${m3u}" 2>/dev/null
+}
+
+psc_find_m3u_for_cue_dir() {
+  cue_path="$1"
+  cue_dir="$(dirname "${cue_path}")"
+  cue_base="$(basename "${cue_path}")"
+  chosen=""
+  for m in "${cue_dir}/"*.m3u "${cue_dir}/"*.M3U; do
+    [ "${m}" = "${cue_dir}/*.m3u" ] && continue
+    [ "${m}" = "${cue_dir}/*.M3U" ] && continue
+    [ -f "${m}" ] || continue
+    if grep -Fq "${cue_base}" "${m}" 2>/dev/null; then
+      chosen="${m}"
+      break
+    fi
+    [ -z "${chosen}" ] && chosen="${m}"
+  done
+  [ -n "${chosen}" ] && echo "${chosen}"
+}
+
+psc_entry_hint_from_intercept_path() {
+  p="$1"
+  case "${p}" in
+    *.m3u|*.M3U)
+      first="$(psc_first_m3u_entry "${p}")"
+      if [ -n "${first}" ]; then
+        case "${first}" in
+          /*) echo "${first}" ;;
+          *) echo "$(dirname "${p}")/${first}" ;;
+        esac
+        return 0
+      fi
+      ;;
+    *.cue|*.CUE)
+      # If there is an .m3u alongside the .cue, treat it as multi-disc and use the first entry.
+      m3u="$(psc_find_m3u_for_cue_dir "${p}")"
+      if [ -n "${m3u}" ]; then
+        first="$(psc_first_m3u_entry "${m3u}")"
+        if [ -n "${first}" ]; then
+          case "${first}" in
+            /*) echo "${first}" ;;
+            *) echo "$(dirname "${m3u}")/${first}" ;;
+          esac
+          return 0
+        fi
+      fi
+      ;;
+  esac
+  echo "${p}"
+}
+
+psc_first_bin_from_cue() {
+  cue_path="$1"
+  [ -f "${cue_path}" ] || return 1
+
+  # Some cue sheets are UTF-16; strip NUL bytes first so sed can match.
+  # Extract the first FILE entry (quoted or unquoted) and treat it as the first-disc BIN.
+  bin_rel="$(tr -d '\000' < "${cue_path}" 2>/dev/null | sed -n \
+    -e '/^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]*\"/{
+          s/^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]*\"//;
+          s/\".*$//;
+          p; q
+        }' \
+    -e '/^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]/{
+          s/^[[:space:]]*[Ff][Ii][Ll][Ee][[:space:]]*//;
+          s/[[:space:]].*$//;
+          p; q
+        }' \
+    2>/dev/null)"
+
+  [ -n "${bin_rel}" ] || return 1
+
+  case "${bin_rel}" in
+    /*) echo "${bin_rel}" ;;
+    *) echo "$(dirname "${cue_path}")/${bin_rel}" ;;
+  esac
+}
+
+psc_parse_disc_serial_from_ra_log() {
+  LOG_FILE="$1"
+  [ -f "${LOG_FILE}" ] || return 1
+  EXE_LINE="$(awk 'BEGIN{IGNORECASE=1} /CD-ROM EXE Name:/{line=$0} END{print line}' "${LOG_FILE}" 2>/dev/null)"
+  if [ -n "${EXE_LINE}" ]; then
+    echo "${EXE_LINE}" | sed -e 's/.*CD-ROM EXE Name:[[:space:]]*//I' -e 's/;.*$//' | tr -d '\r'
+    return 0
+  fi
+  LABEL_LINE="$(awk 'BEGIN{IGNORECASE=1} /CD-ROM Label:/{line=$0} END{print line}' "${LOG_FILE}" 2>/dev/null)"
+  if [ -n "${LABEL_LINE}" ]; then
+    echo "${LABEL_LINE}" | sed -e 's/.*CD-ROM Label:[[:space:]]*//I' -e 's/^\"//' -e 's/\"$//' | tr -d '\r'
+    return 0
+  fi
+  IMG_LINE="$(awk 'BEGIN{IGNORECASE=1} /Loaded CD Image:/{line=$0} END{print line}' "${LOG_FILE}" 2>/dev/null)"
+  if [ -n "${IMG_LINE}" ]; then
+    echo "${IMG_LINE}" | sed -e 's/.*Loaded CD Image:[[:space:]]*//I' -e 's/^\"//' -e 's/\"$//' | tr -d '\r'
+    return 0
+  fi
+  return 1
+}
+
+psc_parse_first_disc_serial_from_ra_log() {
+  LOG_FILE="$1"
+  [ -f "${LOG_FILE}" ] || return 1
+
+  EXE_LINE="$(awk 'BEGIN{IGNORECASE=1} /CD-ROM EXE Name:/{print; exit}' "${LOG_FILE}" 2>/dev/null)"
+  if [ -n "${EXE_LINE}" ]; then
+    echo "${EXE_LINE}" | sed -e 's/.*CD-ROM EXE Name:[[:space:]]*//I' -e 's/;.*$//' | tr -d '\r'
+    return 0
+  fi
+
+  LABEL_LINE="$(awk 'BEGIN{IGNORECASE=1} /CD-ROM Label:/{print; exit}' "${LOG_FILE}" 2>/dev/null)"
+  if [ -n "${LABEL_LINE}" ]; then
+    echo "${LABEL_LINE}" | sed -e 's/.*CD-ROM Label:[[:space:]]*//I' -e 's/^\"//' -e 's/\"$//' | tr -d '\r'
+    return 0
+  fi
+
+  IMG_LINE="$(awk 'BEGIN{IGNORECASE=1} /Loaded CD Image:/{print; exit}' "${LOG_FILE}" 2>/dev/null)"
+  if [ -n "${IMG_LINE}" ]; then
+    echo "${IMG_LINE}" | sed -e 's/.*Loaded CD Image:[[:space:]]*//I' -e 's/^\"//' -e 's/\"$//' | tr -d '\r'
+    return 0
+  fi
+
+  return 1
+}
+
+psc_disc_serial_from_tmp_cdrom_system_cnf() {
+  base="/tmp/cdrom"
+  [ -d "${base}" ] || return 1
+
+  cnf=""
+  for f in "${base}/SYSTEM.CNF" "${base}/system.cnf" "${base}/System.cnf"; do
+    [ -f "${f}" ] && cnf="${f}" && break
+  done
+
+  if [ -z "${cnf}" ]; then
+    # Fall back to a case-insensitive search (some discs use different casing and/or subdirs).
+    find "${base}" -maxdepth 3 -type f 2>/dev/null | while IFS= read -r f; do
+      b="$(basename "${f}")"
+      u="$(echo "${b}" | tr 'a-z' 'A-Z')"
+      if [ "${u}" = "SYSTEM.CNF" ]; then
+        echo "${f}"
+        break
+      fi
+    done | head -n 1 | while IFS= read -r picked; do
+      cnf="${picked}"
+      break
+    done
+  fi
+
+  [ -n "${cnf}" ] || return 1
+
+  tr -d '\000' < "${cnf}" 2>/dev/null | awk 'BEGIN{IGNORECASE=1}{
+    if (match($0, /[A-Za-z]{4}[-_.]?[0-9]{3}[-_.]?[0-9]{2}/)) {
+      print substr($0, RSTART, RLENGTH);
+      exit
+    }
+  }' 2>/dev/null
+}
+
+psc_ra_latest_content_path() {
+  [ -f "${PSC_RA_CONTENT_HISTORY}" ] || return 1
+  # content_history.lpl is JSON, newest entry is typically the first item.
+  # Extract the first "path" under "items".
+  tr -d '\r' < "${PSC_RA_CONTENT_HISTORY}" 2>/dev/null | awk '
+    /"items"[[:space:]]*:/ { in_items=1; next }
+    in_items && /"path"[[:space:]]*:/ {
+      line=$0
+      sub(/.*"path"[[:space:]]*:[[:space:]]*"/, "", line)
+      sub(/".*/, "", line)
+      print line
+      exit
+    }
+  ' 2>/dev/null
+}
+
+psc_disc_serial_from_content_path() {
+  content_path="$1"
+  [ -n "${content_path}" ] || return 1
+
+  if psc_has_serial_pattern "${content_path}"; then
+    echo "${content_path}"
+    return 0
+  fi
+
+  entry="$(psc_entry_hint_from_intercept_path "${content_path}")"
+  if psc_has_serial_pattern "${entry}"; then
+    echo "${entry}"
+    return 0
+  fi
+
+  bin1=""
+  case "${entry}" in
+    *.bin|*.BIN) bin1="${entry}" ;;
+    *.cue|*.CUE) bin1="$(psc_first_bin_from_cue "${entry}")" ;;
+  esac
+  [ -n "${bin1}" ] || return 1
+  [ -f "${bin1}" ] || return 1
+  [ -x "${PSC_HISTORY_LOGGER}" ] || return 1
+
+  out="$(LD_LIBRARY_PATH="${PSC_LOGGER_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}" "${PSC_HISTORY_LOGGER}" bin-serial --bin "${bin1}" 2>>"${PSC_HISTORY_HOOK_LOG}")"
+  serial="$(echo "${out}" | tr -d '\r\n')"
+  psc_has_serial_pattern "${serial}" || return 1
+  echo "${serial}"
+}
+
+psc_game_serial_from_disc_raw() {
+  disc_raw="$1"
+  [ -n "${disc_raw}" ] || return 1
+  [ -x "${PSC_HISTORY_LOGGER}" ] || return 1
+  [ -f "${PSC_PCSX_DB_PATH}" ] || return 1
+
+  out="$(LD_LIBRARY_PATH="${PSC_LOGGER_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}" "${PSC_HISTORY_LOGGER}" game-serial \
+    --pcsx-db "${PSC_PCSX_DB_PATH}" \
+    --disc-serial "${disc_raw}" 2>>"${PSC_HISTORY_HOOK_LOG}")"
+  game_serial="$(echo "${out}" | tr -d '\r\n')"
+  psc_has_serial_pattern "${game_serial}" || return 1
+  echo "${game_serial}"
+}
+
+get_ra_content_id(){
+  # For disc_launcher physical discs, RetroArch may use driveX based on USB order.
+  if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ] && [ -n "${disc_launcher_RA_ID}" ]; then
+    echo "${disc_launcher_RA_ID}"
+  else
+    echo "${INTERCEPT_GAME_ID}"
+  fi
+}
+
+### UI_MENU -> retroarch INTERACTION FUNCTIONS ################################
+#  The follow variables will need to have been gathered from an intercept script
+#  prior to these functions being called
+#
+#  INTERCEPT_GAME_PATH=""     # The full path to the launching game file (follows argument -cdfile)
+#  INTERCEPT_GAME_DIR=""      # The directory game launched from - should be /data/AppData/sony/title
+#  INTERCEPT_GAME_ID=""       # The file name of the game minus the extension (ie. SCUS-0001)
+#  INTERCEPT_GAME_EXT=""      # The extension of game minus . (ie. cue)
+#  INTERCEPT_SAVE_STATE=false # Set to true if ui_menu launches with -load
+
+launch_retroarch_from_StockUI(){
+  START=$(date +%s%N)
+  echo "[PROJECT ERIS](INFO) Launching RetroArch from ui_menu"
+  RA_CONTENT_ID="$(get_ra_content_id)"
+  [ "${PSC_HISTORY_HOOK_LOG}" = "/dev/null" ] || mkdir -p "${PSCSTORE_LOG_DIR}" 2>/dev/null || true
+  echo "[history_hook] enter launch_retroarch_from_StockUI game_id=${INTERCEPT_GAME_ID} path=${INTERCEPT_GAME_PATH}" >> "${PSC_HISTORY_HOOK_LOG}"
+  echo "[history_hook] cfg pcsx_db=${PSC_PCSX_DB_PATH} pcsx_db_exists=$( [ -f "${PSC_PCSX_DB_PATH}" ] && echo yes || echo no ) history_db=${PSC_HISTORY_DB} logger=${PSC_HISTORY_LOGGER} logger_exec=$( [ -x "${PSC_HISTORY_LOGGER}" ] && echo yes || echo no ) logger_ld_path=${PSC_LOGGER_LD_LIBRARY_PATH}" >> "${PSC_HISTORY_HOOK_LOG}"
+  : "${RUNTIME_LOG_PATH:=/tmp/logs}"
+  #  Check RA Exists and is configured correctly
+  rm -f "${RUNTIME_LOG_PATH}/retroarch.log"
+  mkdir -p "${RUNTIME_LOG_PATH}" 2>/dev/null || true
+  : > "${RUNTIME_LOG_PATH}/retroarch.log" 2>/dev/null || true
+  [ ! -f "${RETROARCH_PATH}/retroarch" ] && break #FAIL
+  if [ ! -f "${RETROARCH_PATH}/system/scph102b.bin" ]; then
+    cp -f "/gaadata/system/bios/romw.bin" "${RETROARCH_PATH}/system/scph102b.bin"
+    echo "[PROJECT ERIS](INFO) copied romw.bin to scph102b.bin for RA PCSX"
+  fi
+  mkdir -p "/tmp/ra_cache"
+  chmod +x "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/ra_launch.sh"
+  if [ -d "${RA_SAVESTATE_PATH}" ]; then
+    rm -fr "${RA_SAVESTATE_PATH}"
+  fi
+  mkdir -p "${RA_SAVESTATE_PATH}"
+  link_ra_savestates
+  #  Check if this is a Save State load
+  if [ "${INTERCEPT_SAVE_STATE}" = true ]; then
+    echo "[PROJECT ERIS](INFO) This is a Save State load"
+    if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ] && [ "${RA_CONTENT_ID}" != "${INTERCEPT_GAME_ID}" ]; then
+      if [ ! -f "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000" ] && \
+         [ -f "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000" ]; then
+        cp -f "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000" "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000"
+      fi
+      if [ ! -f "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000.res" ] && \
+         [ -f "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000.res" ]; then
+        cp -f "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000.res" "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000.res"
+      fi
+    fi
+    if [ ! -f "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000" ]; then
+      if [ -f "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000.res" ]; then
+        # Stock PCSX trims spaces out of save state names if they exist, and Stock UI cannot restore save states
+        # which have a space in the name (despite being able to save them!) This save state has a space so copy it manually
+        cp "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000.res" "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000"
+      fi
+    fi
+    mv "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000" "${RA_SAVESTATE_PATH}/${RA_CONTENT_ID}.state.auto"
+  fi
+  #  Launch retroarch
+  echo "[PROJECT ERIS](INFO) Launching RetroArch for game ${INTERCEPT_GAME_PATH}"
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) RetroArch launch_retroarch_from_StockUI function took: $(((END-START)/1000000))ms to execute (up to launching RetroArch executable)"
+  # --- START: disc_launcher MEMORY CARD PRE-LAUNCH SYNC ---
+  if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+    MCD_PATH="/data/AppData/sony/pcsx/.pcsx/memcards/card1.mcd"
+    SRM_PATH="${RETROARCH_PATH}/saves/${RA_CONTENT_ID}.srm"
+    mkdir -p "${RETROARCH_PATH}/saves"
+    
+    # 1. Copy the Stock UI pooled memory card (card1.mcd) to RetroArch's save file name (disc_launcher.srm).
+    # This ensures RetroArch loads the latest pooled data.
+    if [ -f "${MCD_PATH}" ]; then
+      cp -f "${MCD_PATH}" "${SRM_PATH}"
+      echo "[PROJECT ERIS](INFO) disc_launcher: Copied ${MCD_PATH} to ${SRM_PATH} for launch."
+    else
+      echo "[PROJECT ERIS](WARN) disc_launcher: ${MCD_PATH} not found, starting with fresh memory card data."
+    fi
+    
+    # 2. Create a temporary symlink in /tmp/ra_save for RetroArch to read/write during the session.
+    # This points the expected /tmp/ra_save/disc_launcher.srm to the real save file on USB.
+    ln -sf "${SRM_PATH}" "${RA_SAVE_PATH}/${RA_CONTENT_ID}.srm"
+    if [ "${RA_CONTENT_ID}" != "${INTERCEPT_GAME_ID}" ]; then
+      ln -sf "${SRM_PATH}" "${RA_SAVE_PATH}/${INTERCEPT_GAME_ID}.srm"
+    fi
+  fi
+  # --- END: disc_launcher MEMORY CARD PRE-LAUNCH SYNC ---
+
+  # --- START: history/playtime session tracking (RetroArch) ---
+  # Time sanity is required for timestamps; if it's not sane, attempt a quick sync from Windows.
+  if ! psc_sync_time_from_windows_if_needed; then
+    psc_flag_time_sync_failed
+    echo "[history_hook] time not sane; sync failed; flag set" >> "${PSC_HISTORY_HOOK_LOG}"
+  else
+    echo "[history_hook] time sane: now=$(date -u)" >> "${PSC_HISTORY_HOOK_LOG}"
+  fi
+  rm -f "${PSC_SESSION_META}" 2>/dev/null || true
+  if psc_time_is_sane; then
+    # USB/internal games sometimes have .m3u/.cue filenames without serials (e.g. "Disc 1.cue").
+    # If the first-disc entry we launch lacks a serial in its name, extract the disc serial from the
+    # first disc's .bin (SYSTEM.CNF -> BOOT cdrom:\SERIAL...).
+    DISC_SERIAL=""
+    START_GAME_SERIAL=""
+    if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+      # External disc drive: snapshot the current disc serial at launch time.
+      # This becomes the "session game" we validate against on exit.
+      if [ -f "/tmp/disc_launcher.system.cnf.current" ]; then
+        DISC_SERIAL="$(cat /tmp/disc_launcher.system.cnf.current 2>/dev/null | head -n 1 | tr -d '\r\n')"
+      fi
+      if [ -n "${DISC_SERIAL}" ] && psc_has_serial_pattern "${DISC_SERIAL}"; then
+        START_GAME_SERIAL="$(psc_game_serial_from_disc_raw "${DISC_SERIAL}" 2>/dev/null || true)"
+        [ -n "${START_GAME_SERIAL}" ] && echo "[history_hook] disc_launcher start game_serial='${START_GAME_SERIAL}' disc='${DISC_SERIAL}'" >> "${PSC_HISTORY_HOOK_LOG}"
+      else
+        DISC_SERIAL=""
+      fi
+    else
+      DISC1_PATH="$(psc_entry_hint_from_intercept_path "${INTERCEPT_GAME_PATH}")"
+      if [ -n "${DISC1_PATH}" ] && [ -f "${DISC1_PATH}" ]; then
+        if psc_has_serial_pattern "${DISC1_PATH}"; then
+          DISC_SERIAL="${DISC1_PATH}"
+        else
+          BIN1=""
+          case "${DISC1_PATH}" in
+            *.bin|*.BIN) BIN1="${DISC1_PATH}" ;;
+            *.cue|*.CUE) BIN1="$(psc_first_bin_from_cue "${DISC1_PATH}")" ;;
+          esac
+          if [ -n "${BIN1}" ] && [ -f "${BIN1}" ] && [ -x "${PSC_HISTORY_LOGGER}" ]; then
+            echo "[history_hook] bin-serial: extracting serial from bin='${BIN1}' cue_or_entry='${DISC1_PATH}'" >> "${PSC_HISTORY_HOOK_LOG}"
+            DISC_SERIAL_OUT="$(LD_LIBRARY_PATH="${PSC_LOGGER_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}" "${PSC_HISTORY_LOGGER}" bin-serial --bin "${BIN1}" 2>>"${PSC_HISTORY_HOOK_LOG}")"
+            DISC_SERIAL="$(echo "${DISC_SERIAL_OUT}" | tr -d '\r\n')"
+            if psc_has_serial_pattern "${DISC_SERIAL}"; then
+              echo "[history_hook] bin-serial: extracted disc_serial='${DISC_SERIAL}'" >> "${PSC_HISTORY_HOOK_LOG}"
+            else
+              echo "[history_hook] bin-serial: extract failed (bin='${BIN1}' entry='${DISC1_PATH}' out='${DISC_SERIAL}')" >> "${PSC_HISTORY_HOOK_LOG}"
+              DISC_SERIAL=""
+            fi
+          else
+            echo "[history_hook] bin-serial: missing bin/logger (bin='${BIN1}' entry='${DISC1_PATH}')" >> "${PSC_HISTORY_HOOK_LOG}"
+          fi
+        fi
+      fi
+
+      if [ -n "${DISC_SERIAL}" ] && psc_has_serial_pattern "${DISC_SERIAL}"; then
+        START_GAME_SERIAL="$(psc_game_serial_from_disc_raw "${DISC_SERIAL}" 2>/dev/null || true)"
+        [ -n "${START_GAME_SERIAL}" ] && echo "[history_hook] start game_serial='${START_GAME_SERIAL}'" >> "${PSC_HISTORY_HOOK_LOG}"
+      fi
+    fi
+
+    START_UTC="$(date -u +%s 2>/dev/null || echo 0)"
+    TMP_META="${PSC_SESSION_META}.tmp.$$"
+    echo "START_UTC=${START_UTC}" > "${TMP_META}" 2>/dev/null
+    [ -n "${DISC_SERIAL}" ] && echo "DISC_SERIAL=${DISC_SERIAL}" >> "${TMP_META}" 2>/dev/null
+    [ -n "${START_GAME_SERIAL}" ] && echo "START_GAME_SERIAL=${START_GAME_SERIAL}" >> "${TMP_META}" 2>/dev/null
+    sync
+    mv -f "${TMP_META}" "${PSC_SESSION_META}" 2>/dev/null
+    sync
+    echo "[history_hook] session meta written start_utc=${START_UTC}" >> "${PSC_HISTORY_HOOK_LOG}"
+  else
+    echo "[history_hook] session meta skipped (time not sane)" >> "${PSC_HISTORY_HOOK_LOG}"
+  fi
+  # --- END: history/playtime session tracking (RetroArch) ---
+
+  # Capture RetroArch output into our session log so parsing works even if RetroArch's own "log to file"
+  # setting is disabled or points elsewhere.
+  psc_stop_mute_toggle
+  "${PROJECT_ERIS_PATH}/etc/project_eris/SUP/scripts/ra_launch.sh" -v -L "${RETROARCH_PATH}/config/retroarch/cores/${1}" "${INTERCEPT_GAME_PATH}" ${2} \
+    >> "${RUNTIME_LOG_PATH}/retroarch.log" 2>&1
+  echo "[PROJECT ERIS](INFO) RetroArch exit code $?"
+
+  # No background work during RetroArch runtime; finalize on exit via exit_checkSaveState().
+  echo "[history_hook] retroarch returned; waiting for exit_checkSaveState to finalize session" >> "${PSC_HISTORY_HOOK_LOG}"
+
+  # --- START: disc_launcher DISC SERIAL REFRESH ON RETROARCH EXIT (from log) ---
+  # When disc is ejected / swapped, libretro logs "CD-ROM EXE Name: SLES_024.70;1"
+  # Use that to refresh /tmp/disc_launcher.system.cnf.current (1-line serial text).
+  if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+    LOG_FILE="${RUNTIME_LOG_PATH}/retroarch.log"
+    disc_launcher_TMP_CNF="/tmp/disc_launcher.system.cnf.current"
+
+    if [ -f "${LOG_FILE}" ]; then
+      # Always take the LAST occurrence in the log (multiple can exist from boot + swaps)
+      LAST_EXE="$(awk 'BEGIN{IGNORECASE=1} /CD-ROM EXE Name:/{line=$0} END{print line}' "${LOG_FILE}" 2>/dev/null)"
+      EXIT_SERIAL="$(echo "${LAST_EXE}" \
+        | sed -e 's/.*CD-ROM EXE Name:[[:space:]]*//I' -e 's/;.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' )"
+      if [ -z "${EXIT_SERIAL}" ]; then
+        LAST_LABEL="$(awk 'BEGIN{IGNORECASE=1} /CD-ROM Label:/{line=$0} END{print line}' "${LOG_FILE}" 2>/dev/null)"
+        EXIT_SERIAL="$(echo "${LAST_LABEL}" \
+          | sed -e 's/.*CD-ROM Label:[[:space:]]*//I' -e 's/^\"//' -e 's/\"$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' )"
+      fi
+      EXIT_SERIAL="$(echo "${EXIT_SERIAL}" | tr 'a-z' 'A-Z' | tr -d '\r\n ' )"
+
+      if [ -n "${EXIT_SERIAL}" ]; then
+        TMP_CUR="${disc_launcher_TMP_CNF}.tmp.$$"
+        echo "${EXIT_SERIAL}" > "${TMP_CUR}" 2>/dev/null
+        sync
+        mv -f "${TMP_CUR}" "${disc_launcher_TMP_CNF}" 2>/dev/null
+        sync
+        echo "[PROJECT ERIS](INFO) disc_launcher: refreshed DISC SERIAL from log -> ${disc_launcher_TMP_CNF} (${EXIT_SERIAL})"
+      else
+        echo "[PROJECT ERIS](WARN) disc_launcher: could not parse DISC SERIAL from retroarch.log on exit"
+      fi
+
+      # Cleanliness / edge-case hardening: remove the session log after extracting data
+      rm -f "${LOG_FILE}" 2>/dev/null
+      sync
+    else
+      echo "[PROJECT ERIS](WARN) disc_launcher: retroarch.log missing on exit; cannot refresh DISC SERIAL"
+    fi
+  fi
+  # --- END: disc_launcher DISC SERIAL REFRESH ON RETROARCH EXIT (from log) ---
+
+  save_ra_savestates
+  rm -fr "/tmp/ra_cache"
+}
+
+exit_checkSaveState(){
+  START=$(date +%s%N)
+  echo "[PROJECT ERIS](INFO) checking for auto save state on retroarch exit"
+  RA_CONTENT_ID="$(get_ra_content_id)"
+
+  # --- START: history/playtime session finalize (no background during RetroArch) ---
+  [ "${PSC_HISTORY_HOOK_LOG}" = "/dev/null" ] || mkdir -p "${PSCSTORE_LOG_DIR}" 2>/dev/null || true
+  if [ -f "${PSC_SESSION_META}" ]; then
+    . "${PSC_SESSION_META}" 2>/dev/null || true
+    rm -f "${PSC_SESSION_META}" 2>/dev/null || true
+
+    END_UTC="$(date -u +%s 2>/dev/null || echo 0)"
+    LOG_FILE="${RUNTIME_LOG_PATH:-/tmp/logs}/retroarch.log"
+    ENTRY_HINT="$(psc_entry_hint_from_intercept_path "${INTERCEPT_GAME_PATH}")"
+
+    RAW_SERIAL="${DISC_SERIAL}"
+    [ -z "${RAW_SERIAL}" ] && RAW_SERIAL="${ENTRY_HINT}"
+    if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+      # disc_launcher uses a virtual cdrom:// path. Prefer the DISC SERIAL snapshot refreshed on RetroArch exit.
+      if [ -f "/tmp/disc_launcher.system.cnf.current" ]; then
+        RAW_SERIAL="$(cat /tmp/disc_launcher.system.cnf.current 2>/dev/null | head -n 1 | tr -d '\r\n' )"
+      fi
+    fi
+    if ! psc_has_serial_pattern "${RAW_SERIAL}"; then
+      RAW_SERIAL="$(psc_parse_disc_serial_from_ra_log "${LOG_FILE}" 2>/dev/null)"
+    fi
+
+    # External disc drive: validate the final disc still belongs to the session's starting game.
+    # - Start game is snapshotted into PSC_SESSION_META at launch (from /tmp/disc_launcher.system.cnf.current).
+    # - End disc is derived from /tmp/cdrom/SYSTEM.CNF at exit (do not rely on retroarch.log).
+    if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ] && [ -n "${START_GAME_SERIAL}" ]; then
+      # First, verify content_history.lpl contains a cdrom:// path (driveX.cue or disc_launcher.cue)
+      LATEST_CONTENT_PATH="$(psc_ra_latest_content_path 2>/dev/null | tr -d '\r\n')"
+      if [ -n "${LATEST_CONTENT_PATH}" ]; then
+        case "${LATEST_CONTENT_PATH}" in
+          cdrom://drive*.cue|cdrom://disc_launcher.cue)
+            # Valid cdrom:// path found, proceed with serial validation
+            ;;
+          *)
+            echo "[history_hook] finalize canceled: disc_launcher content_history.lpl latest entry not a cdrom path: '${LATEST_CONTENT_PATH}'" >> "${PSC_HISTORY_HOOK_LOG}"
+            RAW_SERIAL=""
+            ;;
+        esac
+      else
+        echo "[history_hook] finalize canceled: disc_launcher content_history.lpl missing or empty" >> "${PSC_HISTORY_HOOK_LOG}"
+        RAW_SERIAL=""
+      fi
+      
+      # Now validate the disc serial if content path check passed
+      if [ -n "${RAW_SERIAL}" ]; then
+        END_DISC_RAW="$(psc_disc_serial_from_tmp_cdrom_system_cnf 2>/dev/null | head -n 1 | tr -d '\r\n')"
+        if [ -z "${END_DISC_RAW}" ] && [ -f "/tmp/disc_launcher.system.cnf.current" ]; then
+          END_DISC_RAW="$(cat /tmp/disc_launcher.system.cnf.current 2>/dev/null | head -n 1 | tr -d '\r\n')"
+        fi
+        if psc_has_serial_pattern "${END_DISC_RAW}"; then
+          END_GAME_SERIAL="$(psc_game_serial_from_disc_raw "${END_DISC_RAW}" 2>/dev/null || true)"
+          if [ -z "${END_GAME_SERIAL}" ]; then
+            echo "[history_hook] finalize canceled: disc_launcher could not map end_disc='${END_DISC_RAW}' via pcsx_data.db" >> "${PSC_HISTORY_HOOK_LOG}"
+            RAW_SERIAL=""
+          elif [ "${END_GAME_SERIAL}" != "${START_GAME_SERIAL}" ]; then
+            echo "[history_hook] finalize canceled: disc_launcher content changed start_game='${START_GAME_SERIAL}' end_game='${END_GAME_SERIAL}'" >> "${PSC_HISTORY_HOOK_LOG}"
+            RAW_SERIAL=""
+          else
+            RAW_SERIAL="${END_DISC_RAW}"
+          fi
+        else
+          echo "[history_hook] finalize canceled: disc_launcher could not parse end disc from /tmp/cdrom SYSTEM.CNF" >> "${PSC_HISTORY_HOOK_LOG}"
+          RAW_SERIAL=""
+        fi
+      fi
+    fi
+
+    # If user changed content inside RetroArch, cancel timestamp unless it's still the same game.
+    # USB/internal: compare the game from start serial vs the latest content path in content_history.lpl.
+    if [ "${INTERCEPT_GAME_ID}" != "disc_launcher" ] && [ -n "${START_GAME_SERIAL}" ]; then
+      EXIT_PATH="$(psc_ra_latest_content_path 2>/dev/null | tr -d '\r\n')"
+      if [ -n "${EXIT_PATH}" ]; then
+        EXIT_DISC_RAW="$(psc_disc_serial_from_content_path "${EXIT_PATH}" 2>/dev/null || true)"
+        if [ -n "${EXIT_DISC_RAW}" ]; then
+          EXIT_GAME_SERIAL="$(psc_game_serial_from_disc_raw "${EXIT_DISC_RAW}" 2>/dev/null || true)"
+          if [ -n "${EXIT_GAME_SERIAL}" ] && [ "${EXIT_GAME_SERIAL}" != "${START_GAME_SERIAL}" ]; then
+            echo "[history_hook] finalize canceled: content changed start_game='${START_GAME_SERIAL}' exit_game='${EXIT_GAME_SERIAL}' exit_path='${EXIT_PATH}'" >> "${PSC_HISTORY_HOOK_LOG}"
+            RAW_SERIAL=""
+          fi
+        else
+          echo "[history_hook] finalize warning: could not derive exit disc from content_history (exit_path='${EXIT_PATH}')" >> "${PSC_HISTORY_HOOK_LOG}"
+        fi
+      else
+        echo "[history_hook] finalize warning: content_history missing/empty; skipping content-change check" >> "${PSC_HISTORY_HOOK_LOG}"
+      fi
+    fi
+
+    if ! psc_time_is_sane; then
+      psc_flag_time_sync_failed
+      echo "[history_hook] finalize skipped (time not sane) start_utc=${START_UTC} end_utc=${END_UTC}" >> "${PSC_HISTORY_HOOK_LOG}"
+    elif [ ! -x "${PSC_HISTORY_LOGGER}" ]; then
+      echo "[history_hook] finalize skipped (missing logger ${PSC_HISTORY_LOGGER})" >> "${PSC_HISTORY_HOOK_LOG}"
+    elif [ ! -f "${PSC_PCSX_DB_PATH}" ]; then
+      echo "[history_hook] finalize skipped (missing pcsx db ${PSC_PCSX_DB_PATH})" >> "${PSC_HISTORY_HOOK_LOG}"
+    elif [ -z "${START_UTC}" ] || [ "${START_UTC}" -le 0 ] || [ "${END_UTC}" -le 0 ]; then
+      echo "[history_hook] finalize skipped (bad times start_utc=${START_UTC} end_utc=${END_UTC})" >> "${PSC_HISTORY_HOOK_LOG}"
+    elif [ -z "${RAW_SERIAL}" ] || ! psc_has_serial_pattern "${RAW_SERIAL}"; then
+      echo "[history_hook] finalize skipped (no serial; raw_serial='${RAW_SERIAL}' entry_hint='${ENTRY_HINT}' log_file='${LOG_FILE}')" >> "${PSC_HISTORY_HOOK_LOG}"
+    else
+      echo "[history_hook] finalize raw_serial='${RAW_SERIAL}' start_utc=${START_UTC} end_utc=${END_UTC} log_file='${LOG_FILE}'" >> "${PSC_HISTORY_HOOK_LOG}"
+      SID_OUT="$(LD_LIBRARY_PATH="${PSC_LOGGER_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}" "${PSC_HISTORY_LOGGER}" add \
+        --pcsx-db "${PSC_PCSX_DB_PATH}" \
+        --history-db "${PSC_HISTORY_DB}" \
+        --disc-serial "${RAW_SERIAL}" \
+        --start-utc "${START_UTC}" \
+        --end-utc "${END_UTC}" \
+        --source "retroarch" \
+        --path "${INTERCEPT_GAME_PATH}" 2>>"${PSC_HISTORY_HOOK_LOG}")"
+      logger_rc=$?
+      SID="$(echo "${SID_OUT}" | tr -d '\r\n')"
+      if [ "${logger_rc}" -eq 0 ] && [ -n "${SID}" ]; then
+        echo "[history_hook] finalize ok session_id=${SID}" >> "${PSC_HISTORY_HOOK_LOG}"
+      else
+        echo "[history_hook] finalize failed (rc=${logger_rc} sid='${SID}')" >> "${PSC_HISTORY_HOOK_LOG}"
+      fi
+    fi
+
+  else
+    echo "[history_hook] finalize skipped (no meta file ${PSC_SESSION_META})" >> "${PSC_HISTORY_HOOK_LOG}"
+  fi
+  # --- END: history/playtime session finalize ---
+
+  # --- START: disc_launcher MEMORY CARD POST-EXIT SYNC (MOVED TO START) ---
+  if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+    MCD_PATH="/data/AppData/sony/pcsx/.pcsx/memcards/card1.mcd"
+    SRM_PATH="${RETROARCH_PATH}/saves/${RA_CONTENT_ID}.srm"
+    
+    # Copy RetroArch's save file (disc_launcher.srm) back to the Stock UI pooled memory card (card1.mcd)
+    if [ -f "${SRM_PATH}" ]; then
+      cp -f "${SRM_PATH}" "${MCD_PATH}"
+      echo "[PROJECT ERIS](INFO) disc_launcher: Copied ${SRM_PATH} back to ${MCD_PATH} for UI update."
+    else
+      echo "[PROJECT ERIS](WARN) disc_launcher: ${SRM_PATH} not found after exit."
+    fi
+  fi
+  # --- END: disc_launcher MEMORY CARD POST-EXIT SYNC ---
+  # An auto save state is created automatically, but what if the game disc was changed since
+  # retroarch was originally launched. Check that the last saved state matches the ID of the launching
+  # game
+  RA_LAST_GAME=$(ls -t "${RA_SAVESTATE_PATH}/"*.auto | head -1)
+  if [ x"${RA_LAST_GAME}" = x"" ]; then
+    echo "[PROJECT ERIS](INFO) no auto save state exists"
+    END=$(date +%s%N)
+    echo "[PROJECT ERIS](PROFILE) RetroArch check for save state took: $(((END-START)/1000000))ms to execute"
+    return 0
+  fi
+  RA_LAST_GAME="${RA_LAST_GAME##*/}"          # Remove leading directories
+  RA_LAST_GAME="${RA_LAST_GAME%.state.auto}"  # Remove trailing file extension .state.auto
+  if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ] && [ "${RA_LAST_GAME}" = "${RA_CONTENT_ID}" ]; then
+    RA_LAST_GAME="${INTERCEPT_GAME_ID}"
+  fi
+  if [ ! "${RA_LAST_GAME}" = "${INTERCEPT_GAME_ID}" ]; then
+    #  The last save state was for a different game, check if this disc belongs to the launching game
+    #  If it does then a disc swap has occured, so update the game ids so the correct save state
+    #  data is passed to ui_menu state is from a game which is different to the launched game"
+    if [ -f "/data/AppData/sony/title/${RA_LAST_GAME}.${INTERCEPT_GAME_EXT}" ]; then
+      echo "[PROJECT ERIS](INFO) ${RA_LAST_GAME}.${INTERCEPT_GAME_EXT} exists and belongs to the launching game, updating save state"
+      INTERCEPT_GAME_PATH="/data/AppData/sony/title/${RA_LAST_GAME}.${INTERCEPT_GAME_EXT}"
+      INTERCEPT_GAME_ID="${RA_LAST_GAME}"
+      echo "[PROJECT ERIS](INFO) New game path: ${INTERCEPT_GAME_PATH}"
+      echo "[PROJECT ERIS](INFO) New Game ID: ${INTERCEPT_GAME_ID}"
+    else
+      echo "[PROJECT ERIS](INFO) the last played game does not appear to belong to the game we launched from, so we'll ignore it [${RA_LAST_GAME}.${INTERCEPT_GAME_EXT}]"
+    fi
+  fi
+  #  Check if an auto save state exists and then move it to the correct location for ui_menu to handle
+  if [ -f "${RA_SAVESTATE_PATH}/${RA_CONTENT_ID}.state.auto" ]; then
+    echo "[PROJECT ERIS](INFO) an auto save state exists"
+    #  Create filename.txt
+    echo "${INTERCEPT_GAME_PATH}" > "/data/AppData/sony/pcsx/.pcsx/filename.txt"
+    echo "${INTERCEPT_GAME_ID}" >> "/data/AppData/sony/pcsx/.pcsx/filename.txt"
+    #  Create save state folders
+    mkdir -p "/data/AppData/sony/pcsx/.pcsx/sstates"
+    mkdir -p "/data/AppData/sony/pcsx/.pcsx/screenshots"
+    #  Move save state files
+    mv "${RA_SAVESTATE_PATH}/${RA_CONTENT_ID}.state.auto" "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000"
+    if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ] && [ "${RA_CONTENT_ID}" != "${INTERCEPT_GAME_ID}" ]; then
+      cp -f "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000" "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000"
+      if [ -f "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000.res" ]; then
+        cp -f "/data/AppData/sony/pcsx/.pcsx/sstates/${INTERCEPT_GAME_ID}.000.res" "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000.res"
+      fi
+      # Clean up driveN leftovers so only disc_launcher is visible in UI.
+      rm -f "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000" \
+            "/data/AppData/sony/pcsx/.pcsx/sstates/${RA_CONTENT_ID}.000.res" \
+            "/data/AppData/sony/pcsx/.pcsx/screenshots/${RA_CONTENT_ID}.png" 2>/dev/null
+    fi
+
+# --- START: disc_launcher SAVE-STATE DISC REFERENCE CAPTURE (2-case create vs update) ---
+if [ "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+  (
+    # Resolve volatile .pcsx symlink to a real path (prevents ui_menu resume from breaking watchers)
+    PCSX_LINK="/data/AppData/sony/pcsx/.pcsx"
+    PCSX_REAL="$(readlink -f "${PCSX_LINK}" 2>/dev/null)"
+
+    if [ -z "${PCSX_REAL}" ] || [ ! -d "${PCSX_REAL}" ]; then
+      echo "[PROJECT ERIS](BG-MONITOR)(WARN) disc_launcher: .pcsx real path not available yet; waiting briefly..."
+      t=0
+      while [ $t -lt 100 ]; do  # 10s @ 0.1s
+        PCSX_REAL="$(readlink -f "${PCSX_LINK}" 2>/dev/null)"
+        [ -n "${PCSX_REAL}" ] && [ -d "${PCSX_REAL}" ] && break
+        usleep 100000
+        t=$((t+1))
+      done
+    fi
+
+    if [ -z "${PCSX_REAL}" ] || [ ! -d "${PCSX_REAL}" ]; then
+      echo "[PROJECT ERIS](BG-MONITOR)(ERROR) disc_launcher: could not resolve .pcsx real path; aborting reference capture"
+      exit 0
+    fi
+
+    SSTATES_DIR="${PCSX_REAL}/sstates"
+    PLACEHOLDER="${SSTATES_DIR}/disc_launcher.000"
+    RES_FILE="${SSTATES_DIR}/disc_launcher.000.res"
+    REF_FILE="${SSTATES_DIR}/disc_launcher.system.cnf"
+    # Prefer the stable snapshot created during launch (works even if /tmp/cdrom is stale)
+    disc_launcher_TMP_CNF="/tmp/disc_launcher.system.cnf.current"
+
+    copy_ref_cnf() {
+      if [ -f "${disc_launcher_TMP_CNF}" ]; then
+        TMP_REF="${REF_FILE}.tmp.$$"
+        cp -f "${disc_launcher_TMP_CNF}" "${TMP_REF}"
+        sync
+        mv -f "${TMP_REF}" "${REF_FILE}"
+        sync
+        echo "[PROJECT ERIS](BG-MONITOR) disc_launcher: copied DISC SERIAL snapshot (${disc_launcher_TMP_CNF}) to ${REF_FILE}"
+        return 0
+      fi
+
+      # Fallback: attempt direct mount lookup (case-insensitive) if snapshot missing
+      MOUNT_PT="/tmp/cdrom"
+      if [ -d "${MOUNT_PT}" ]; then
+        DISC_CNF="$(find "${MOUNT_PT}" -maxdepth 1 -iname 'system.cnf' 2>/dev/null | head -n 1)"
+        if [ -n "${DISC_CNF}" ] && [ -f "${DISC_CNF}" ]; then
+          TMP_REF="${REF_FILE}.tmp.$$"
+          cp -f "${DISC_CNF}" "${TMP_REF}"
+          sync
+          mv -f "${TMP_REF}" "${REF_FILE}"
+          sync
+          echo "[PROJECT ERIS](BG-MONITOR) disc_launcher: copied DISC SERIAL (fallback mount) to ${REF_FILE}"
+          return 0
+        fi
+      fi
+
+      echo "[PROJECT ERIS](BG-MONITOR)(WARN) disc_launcher: SYSTEM.CNF not available (no snapshot, no mount); not copying"
+      return 1
+    }
+
+    # Snapshot BEFORE state
+    RES_EXISTED=0
+    BASE_MTIME=""
+    BASE_SIZE=""
+
+    if [ -f "${RES_FILE}" ]; then
+      RES_EXISTED=1
+      BASE_MTIME="$(stat -c %Y "${RES_FILE}" 2>/dev/null)"
+      BASE_SIZE="$(wc -c < "${RES_FILE}" 2>/dev/null)"
+    fi
+
+    ############################################################
+    # CASE 1: disc_launcher.000.res is FIRST CREATED (didn't exist -> exists)
+    ############################################################
+    if [ "${RES_EXISTED}" -eq 0 ]; then
+      echo "[PROJECT ERIS](BG-MONITOR) disc_launcher: CASE1 waiting for first creation of ${RES_FILE}..."
+
+      i=0
+      while [ $i -lt 1800 ]; do  # 180s @ 0.1s
+        if [ -f "${RES_FILE}" ]; then
+          # wait briefly for file to "settle" (avoid copying on a transient create)
+          LAST_SZ=""
+          STABLE=0
+          j=0
+          while [ $j -lt 10 ]; do  # 1s total @ 0.1s
+            CUR_SZ="$(wc -c < "${RES_FILE}" 2>/dev/null)"
+            if [ -n "${CUR_SZ}" ] && [ "${CUR_SZ}" != "0" ] && [ "${CUR_SZ}" = "${LAST_SZ}" ]; then
+              STABLE=$((STABLE + 1))
+            else
+              STABLE=0
+              LAST_SZ="${CUR_SZ}"
+            fi
+            usleep 100000
+            j=$((j+1))
+          done
+          if [ $STABLE -ge 5 ]; then
+            copy_ref_cnf
+            exit 0
+          fi
+        fi
+        usleep 100000
+        i=$((i+1))
+      done
+
+      echo "[PROJECT ERIS](BG-MONITOR)(WARN) disc_launcher: CASE1 ${RES_FILE} never appeared (user likely hit NO)"
+      exit 0
+    fi
+
+    ############################################################
+    # CASE 2: disc_launcher.000.res EXISTS and is UPDATED
+    # Wait for placeholder appear -> disappear, then require .res updated
+    ############################################################
+    echo "[PROJECT ERIS](BG-MONITOR) disc_launcher: CASE2 waiting for placeholder ${PLACEHOLDER} to APPEAR..."
+
+    i=0
+    while [ $i -lt 1800 ]; do  # 180s @ 0.1s
+      [ -f "${PLACEHOLDER}" ] && break
+      usleep 100000
+      i=$((i+1))
+    done
+    if [ ! -f "${PLACEHOLDER}" ]; then
+      echo "[PROJECT ERIS](BG-MONITOR)(WARN) disc_launcher: CASE2 placeholder never appeared (user likely hit NO)"
+      exit 0
+    fi
+
+    echo "[PROJECT ERIS](BG-MONITOR) disc_launcher: CASE2 placeholder appeared; waiting for it to DISAPPEAR..."
+
+    i=0
+    while [ $i -lt 1800 ]; do  # 180s @ 0.1s
+      [ -f "${PLACEHOLDER}" ] || break
+      usleep 100000
+      i=$((i+1))
+    done
+    if [ -f "${PLACEHOLDER}" ]; then
+      echo "[PROJECT ERIS](BG-MONITOR)(WARN) disc_launcher: CASE2 placeholder never disappeared; not copying"
+      exit 0
+    fi
+
+    echo "[PROJECT ERIS](BG-MONITOR) disc_launcher: CASE2 placeholder disappeared; waiting for ${RES_FILE} to be UPDATED..."
+
+    UPDATED=0
+    i=0
+    while [ $i -lt 1800 ]; do  # 180s @ 0.1s
+      if [ -f "${RES_FILE}" ]; then
+        NEW_MTIME="$(stat -c %Y "${RES_FILE}" 2>/dev/null)"
+        NEW_SIZE="$(wc -c < "${RES_FILE}" 2>/dev/null)"
+
+        # Updated if mtime changed OR size changed (mtime can be 1-second granularity)
+        if [ -n "${NEW_MTIME}" ] && [ "${NEW_MTIME}" != "${BASE_MTIME}" ]; then
+          UPDATED=1
+          break
+        fi
+        if [ -n "${NEW_SIZE}" ] && [ "${NEW_SIZE}" != "${BASE_SIZE}" ]; then
+          UPDATED=1
+          break
+        fi
+      fi
+
+      usleep 100000
+      i=$((i+1))
+    done
+
+    if [ "${UPDATED}" -eq 1 ]; then
+      copy_ref_cnf
+      exit 0
+    fi
+
+    echo "[PROJECT ERIS](BG-MONITOR)(WARN) disc_launcher: CASE2 ${RES_FILE} did not update within window; not copying"
+    exit 0
+  ) &
+fi
+# --- END: disc_launcher SAVE-STATE DISC REFERENCE CAPTURE (2-case create vs update) ---
+
+	if [ -f "${RA_SAVESTATE_PATH}/${RA_CONTENT_ID}.state.auto.png" ]; then
+		mv "${RA_SAVESTATE_PATH}/${RA_CONTENT_ID}.state.auto.png" "/data/AppData/sony/pcsx/.pcsx/screenshots/${INTERCEPT_GAME_ID}.png"
+	else
+		cp "${PROJECT_ERIS_PATH}/etc/project_eris/IMG/retroarch.png" "/data/AppData/sony/pcsx/.pcsx/screenshots/${INTERCEPT_GAME_ID}.png"
+	fi
+  fi
+  # Remove the temporary save state folder. This is only used when Stock UI is launching RetroArch
+  # and only for the current game
+  rm -fR "${RA_SAVESTATE_PATH}"
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) RetroArch check for save state took: $(((END-START)/1000000))ms to execute"
+}
+
+link_ra_memory_cards(){
+  #  This function will link ui_menu and retroarch memory cards
+  #  ui_menu memory cards take precedence
+  START=$(date +%s%N)
+  echo "[PROJECT ERIS](INFO) linking ui_menu memory cards to RetroArch"
+  if ls -la | grep -i ".pcsx ->"; then
+    if [ ! -f "/data/AppData/sony/pcsx/.pcsx/memcards/card1.mcd" ]; then
+      mkdir -p "/data/AppData/sony/pcsx/.pcsx/memcards"
+      cp "/usr/sony/share/data/memcard/card.mcd" "/data/AppData/sony/pcsx/.pcsx/memcards/card1.mcd"
+    fi
+    if [ -d "${RA_SAVE_PATH}" ]; then
+      # This is a temporary save location for use by the current RetroArch game only
+      rm -fr "${RA_SAVE_PATH}"
+    fi
+    mkdir -p "${RA_SAVE_PATH}"
+    # Set the target memory card path
+    TARGET_MCD_PATH="/data/AppData/sony/pcsx/.pcsx/memcards/card1.mcd"
+    
+    # Only link to card1.mcd if it's NOT the disc_launcher ID.
+    # We will handle disc_launcher via a copy/sync operation for guaranteed stability and UI visibility.
+    if [ ! "${INTERCEPT_GAME_ID}" = "disc_launcher" ]; then
+      ln -sf "${TARGET_MCD_PATH}" "${RA_SAVE_PATH}/${INTERCEPT_GAME_ID}.srm"
+    fi
+    # RetroArch creates a memory card per game, which means all possible game discs need to be linked back to
+    # /data/AppData/sony/pcsx/.pcsx/memcards/card1.mcd. If this isn't done then each individual disc will have its
+    # own memory card
+    #
+    # This is rather brute force at the moment, but iterate through each file in the directory and create a memory card symlink
+    for e in "/data/AppData/sony/title/"*; do
+      if [ -f "${e}" ]; then
+        TEMP_ID="${e##*/}"
+        TEMP_ID="${TEMP_ID%.*}"
+        ln -sf "/data/AppData/sony/pcsx/.pcsx/memcards/card1.mcd" "${RA_SAVE_PATH}/${TEMP_ID}.srm"
+      fi
+    done
+  fi
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) RetroArch link memory cards took: $(((END-START)/1000000))ms to execute"
+}
+
+link_ra_savestates(){
+  # This function will link relevant RetroArch save states into the temporary save state location
+  # which will enable the additional multiple save slot functionality RetroArch provides when
+  # launched from the Stock UI
+  START=$(date +%s%N)
+  echo "[PROJECT ERIS](INFO) linking other RetroArch save states into temporary location"
+  RA_CONTENT_ID="$(get_ra_content_id)"
+  find "${RETROARCH_PATH}/savestates/" -name "${RA_CONTENT_ID}.state*" -a ! -name "${RA_CONTENT_ID}.state.*" -maxdepth 1 -type f -exec ln -sf "{}" "${RA_SAVESTATE_PATH}" +
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) link_ra_save_states took: $(((END-START)/1000000))ms to execute"
+}
+
+save_ra_savestates(){
+  # This function will move any save states, other than auto save states, that may have been created
+  # during this session back into the main RetroArch save state folder
+  START=$(date +%s%N)
+  echo "[PROJECT ERIS](INFO) moving other RetroArch save states back to the main RetroArch location"
+  find "${RA_SAVESTATE_PATH}" -name "*.state*" -a ! -name "*state.*" -maxdepth 1 -type f -exec mv "{}" "${RETROARCH_PATH}/savestates/" +
+  END=$(date +%s%N)
+  echo "[PROJECT ERIS](PROFILE) save_ra_savestates took: $(((END-START)/1000000))ms to execute"
+}
+
+###############################################################################

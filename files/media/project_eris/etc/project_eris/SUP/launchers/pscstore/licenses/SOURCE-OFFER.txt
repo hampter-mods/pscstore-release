@@ -1,0 +1,40 @@
+PSC Store Source Availability Notes
+===================================
+
+PSC Store distributes or modifies third-party components under GPL/LGPL-style
+licenses. For those components, recipients should be able to obtain the
+corresponding source code for the exact binaries and scripts distributed with
+PSC Store.
+
+Components that need corresponding source availability include at least:
+
+- Modified Project Eris / ModMyClassic scripts
+- Patched RetroArch 1.8.8 build
+- PCSX-ReARMed disc-project core
+
+Published PSC Store source references:
+
+- Patched RetroArch 1.8.8 build:
+  https://github.com/hampter-mods/psc-RetroArch-1.8.8
+- PCSX-ReARMed disc-project core:
+  https://github.com/hampter-mods/psc-PCSX-ReARMed-discproject
+
+Script source note:
+
+- Modified Project Eris / ModMyClassic scripts are included in this package as
+  script source. Their upstream/original script materials are also included in
+  the Project Eris v1.0.0 full package:
+  https://modmyclassic.com/wp-content/uploads/2025/08/Project_Eris-v1.0.0-fb9d576.zip
+
+Upstream and provenance references:
+
+- RetroArch: https://github.com/libretro/RetroArch
+- PCSX-ReARMed: https://github.com/libretro/pcsx_rearmed
+- Honeylab CD-ROM driver article:
+  https://honeylab.hatenablog.jp/entry/2019/01/16/002111
+- libcrypt-patcher / lcp: https://github.com/alex-free/libcrypt-patcher
+- Project Eris / ModMyClassic:
+  https://github.com/Project-Eris-psc
+  https://modmyclassic.com/
+  https://modmyclassic.com/wp-content/uploads/2025/08/Project_Eris-v1.0.0-fb9d576.zip
+- PSC Store release repository: https://github.com/hampter-mods/pscstore-release

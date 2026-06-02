@@ -1,0 +1,30 @@
+Linux Kernel Module Notice
+==========================
+
+PSC Store distributes the following Linux kernel modules for external optical
+drive support on Project Eris systems:
+
+- cdrom.ko
+- sg.ko
+- sr_mod.ko
+
+Binary provenance:
+
+These modules were sourced from honeylab's "CD-ROM driver On Playstation
+Classic" article, which links a cdrom.tar.gz package and documents loading
+cdrom.ko, sg.ko, and sr_mod.ko on the console:
+
+https://honeylab.hatenablog.jp/entry/2019/01/16/002111
+
+Module metadata reports:
+
+- license=GPL
+- vermagic=4.4.22 SMP preempt ARMv7 p2v8
+- sg.ko description=SCSI generic (sg) driver
+- sg.ko author=Douglas Gilbert
+- sr_mod.ko description=SCSI cdrom (sr) driver
+- sr_mod.ko depends=cdrom
+
+These module binaries report GPL kernel-module metadata. PSC Store includes
+this provenance note and GPLv2 notice text for them. See GPL-2.0.txt for the
+GNU General Public License, Version 2.
