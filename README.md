@@ -261,17 +261,13 @@ External disc drives may need extra power. A Y-splitter, rear OTG power plus fro
 
 ---
 
-## Internal Games / Homebrew
+## Internal Games Notes
 
 If you intend to add, remove, or replace internal games, back up the original 20 included games first. PSC Store currently does not include a stock internal-game backup/restore tool.
 
 For internal-game backups, consider the Project Eris backup mod `projecteris-internal-apps_1.0.0_SONYPSC-2713d08.mod` from the [Project Eris backup mod archive](https://github.com/Jetup13/%50%6C%61%79%53%74%61%74%69%6F%6E-Classic-Wiki/releases/tag/Backup).
 
 That mod provides a **Backup internal games** launcher which can copy the original internal games to your Project Eris USB. A built-in PSC Store backup/restore flow may be added in a future release.
-
-Community-made homebrew game provisioning may also be added in the future. For now, homebrew can still be added through the Project Eris desktop app, or played through the PS1 Game Disc launcher when burned to compatible physical media.
-
-Game translation support and PSC Store app translations are planned and will be coming soon.
 
 ---
 
