@@ -38,6 +38,18 @@ function Test-LfNormalizedPayload {
     return $false
 }
 
+function Test-UpdateManifestExcludedPayload {
+    param([string]$DestPath)
+
+    # These trust files are bootstrap assets for first install packages. After
+    # install, psc_tls_bundle.sh owns refreshing them, so the updater should not
+    # overwrite a newer runtime bundle with older manifest payloads.
+    if ($DestPath -like "*/SUP/keys/cacert.pem") { return $true }
+    if ($DestPath -like "*/SUP/keys/r12.pem") { return $true }
+    if ($DestPath -like "*/SUP/keys/e8.pem") { return $true }
+    return $false
+}
+
 function Convert-FileToLf {
     param([string]$Path)
 
@@ -83,14 +95,16 @@ Get-ChildItem -LiteralPath $root -Recurse -File |
     ForEach-Object {
         $relative = $_.FullName.Substring($root.Length + 1).Replace('\', '/')
         $dest = "/" + $relative
-        if (Test-LfNormalizedPayload $dest) {
-            Convert-FileToLf $_.FullName
-            $_ = Get-Item -LiteralPath $_.FullName
+        if (-not (Test-UpdateManifestExcludedPayload $dest)) {
+            if (Test-LfNormalizedPayload $dest) {
+                Convert-FileToLf $_.FullName
+                $_ = Get-Item -LiteralPath $_.FullName
+            }
+            $md5 = (Get-FileHash -LiteralPath $_.FullName -Algorithm MD5).Hash.ToLowerInvariant()
+            $mode = Get-InstallMode $dest
+            $policy = Get-UpdatePolicy $dest
+            $rows.Add("$md5|$($_.Length)|$mode|$policy|$dest|$relative")
         }
-        $md5 = (Get-FileHash -LiteralPath $_.FullName -Algorithm MD5).Hash.ToLowerInvariant()
-        $mode = Get-InstallMode $dest
-        $policy = Get-UpdatePolicy $dest
-        $rows.Add("$md5|$($_.Length)|$mode|$policy|$dest|$relative")
     }
 
 Set-Content -LiteralPath $ManifestPath -Value $rows -Encoding ASCII
