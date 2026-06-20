@@ -37,7 +37,9 @@ When External Sources is enabled, PSC Store creates a blank source TSV file in t
 
 `/ps1_external_sources.tsv`
 
-Add your own lawful source entries to that file. PSC Store will only request external downloads from entries you provide.
+You can add or update your own lawful source entries directly in that file or through PSC Store External Source Management when attempting a download. External Source Management temporarily opens a paired webpage on your local network while it is active and saves the links you provide to the same TSV file. It does not host or relay game files.
+
+PSC Store will only request external downloads from entries you provide.
 
 LibCrypt compatibility, when needed, is handled locally with the on-device patcher where possible for preservation purposes. PSC Store does not retrieve SBI files.
 
@@ -141,6 +143,23 @@ When a job finishes, PSC Store shows a clear completion screen instead of leavin
   <img src="docs/screenshots/pscstore_app_download_complete.jpg" width="49%" alt="Download complete">
 </p>
 
+### External Source Management
+
+External Sources is opt-in. When enabled, PSC Store can open External Source Management for the selected game when you need to add or update your own source entries.
+
+<p>
+  <img src="docs/screenshots/pscstore_app_source_assistant.jpg" width="49%" alt="External Source Management in PSC Store">
+</p>
+
+The in-app screen shows the local address, QR code, and pairing code while the session is active. External Source Management temporarily opens a paired webpage on your local network while it is active.
+
+<p>
+  <img src="docs/screenshots/webserver_external_source_management_pair_page.PNG" width="49%" alt="External Source Management pair page">
+  <img src="docs/screenshots/webserver_external_source_management_selected_game_page.PNG" width="49%" alt="External Source Management selected game page">
+</p>
+
+After pairing, you can add or update your own lawful source entries for the selected game. It saves the links you provide to `/ps1_external_sources.tsv`, does not host or relay game files, and PSC Store will only request external downloads from entries you provide.
+
 ### Saves And Backups
 
 PSC Store includes save management from the console. You can check whether a save backup exists, back up saves before removing games, and restore saves after installing a game again.
@@ -220,7 +239,7 @@ External Sources is opt-in. The Content Notice explains what PSC Store does, wha
   <img src="docs/screenshots/pscstore_app_settings.jpg" width="49%" alt="Settings">
 </p>
 
-Settings include a Delete Data option for clearing PSC Store's on-device app data, including playtime, download history, settings, and sessions. Installed games remain installed, and save backups are kept safe.
+Settings include a Delete Data option for selectively clearing PSC Store data. You can choose to delete from Settings, History, Remembered Devices, External Sources, and Game Save Backups. Installed games remain installed.
 
 <p>
   <img src="docs/screenshots/pscstore_app_delete_data_prompt.jpg" width="49%" alt="Delete data prompt">
@@ -243,13 +262,17 @@ Download the latest files from the GitHub Releases page:
 
 External Sources remains disabled by default after installation.
 
-External downloads are opt-in. When External Sources is enabled, PSC Store generates a blank source TSV file for your own lawful source entries. PSC Store does not include, fetch, scrape, or maintain any third-party game-download source list.
+PSC Store does not provide, recommend, host, scrape, or maintain game download sources.
 
 PSC Store creates the source file at the root of the Project Eris USB:
 
 - `/ps1_external_sources.tsv`
 
-Follow the notes inside the generated TSV template.
+You can add or update your own lawful source entries directly in that file or through PSC Store External Source Management when attempting a download.
+
+External Source Management temporarily opens a paired webpage on your local network while it is active and saves the links you provide to the same TSV file. It does not host or relay game files.
+
+PSC Store will only request external downloads from entries you provide. Follow the notes inside the generated TSV template, or follow the in-app External Source Management prompts.
 
 ---
 
@@ -289,7 +312,7 @@ If the automatic update channel is unavailable, PSC Store can still be updated m
 2. Copy `pscstore-uninstall-vX.X.X.mod` to your Project Eris USB inside `/project_eris/mods/`.
 3. Boot the PS Classic and let Project Eris uninstall the mod.
 
-The uninstall package removes PSC Store itself. It does not delete your installed games or your save backups in the `/saves` folder at the root of the Project Eris USB.
+The uninstall package removes PSC Store itself. It does not delete your installed games, your save backups in the `/saves` folder at the root of the Project Eris USB, or your `/ps1_external_sources.tsv` file.
 
 ---
 
@@ -431,3 +454,4 @@ The top-level [LICENSE.md](LICENSE.md) scopes this release repository's own mate
 - GNU Lesser General Public License: https://www.gnu.org/licenses/lgpl-2.1.html
 
 This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit. It also includes cryptographic software written by Eric Young and software written by Tim Hudson. 7-Zip is Copyright (C) Igor Pavlov and is distributed under the GNU LGPL, with additional BSD 3-clause and unRAR restriction notes in the 7-Zip source license. UPX is used with its compressed-executable exception. All third-party names, trademarks, and content remain the property of their respective owners.
+
