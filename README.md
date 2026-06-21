@@ -263,7 +263,7 @@ If no update is available, PSC Store shows a simple up-to-date result instead of
 
 ### Settings And Notices
 
-External Sources is opt-in. The Content Notice explains what PSC Store does, what it does not host, and what responsibility remains with the user. It is shown on first launch, and when External Sources is enabled it is shown before attempted downloads. Credits and References provides attribution for the projects, tools, libraries, fonts, and references PSC Store uses or builds alongside. Both are available in Settings under the About section.
+External Sources are opt-in. The Content Notice explains what PSC Store does, what it does not host, and what responsibility remains with the user. It is shown on the first launch and in Settings under the About section. Credits and References provides attribution for the projects, tools, libraries, fonts, and references PSC Store uses or builds alongside them.
 
 <p>
   <img src="docs/screenshots/pscstore_app_content_notice.jpg" width="49%" alt="Content Notice">
