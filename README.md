@@ -226,6 +226,41 @@ PSC Store can show play sessions and playtime history when Project Eris networki
   <img src="docs/screenshots/pscstore_app_sessions_info.jpg" width="49%" alt="Sessions info">
 </p>
 
+### Updates
+
+PSC Store uses a signed HTTPS update channel. The app downloads a release manifest, verifies its signature, then verifies each updated file against the manifest before applying it.
+
+You can check for updates manually by pressing **[Select]** on Home, or from Settings under **Update options** -> **Check for updates**.
+
+<p>
+  <img src="docs/screenshots/pscstore_app_manual_check_for_updates.jpg" width="49%" alt="Manual check for updates">
+  <img src="docs/screenshots/pscstore_app_settings_update_options.jpg" width="49%" alt="Update options in Settings">
+</p>
+
+By default, **App update reminders** is set to **Remind when available**. The Update options screen in settings lets you check manually and change how PSC Store handles update reminders. In the **Update Available** prompt, **Remind me later** dismisses the prompt and lets PSC Store ask again later, while **Do not remind me** changes **App update reminders** to **Do not remind me**, which disables automatic update reminders until you change the setting again.
+
+If an update is available and **App update reminders** is set to **Remind when available**, PSC Store shows the update prompt at startup or while the app is open. Accepting the update then makes PSC Store check the installed files it needs to replace before applying the update.
+
+<p>
+  <img src="docs/screenshots/pscstore_app_update_available.jpg" width="49%" alt="Update available">
+  <img src="docs/screenshots/pscstore_app_updates_checking_installed_files.jpg" width="49%" alt="Checking installed files during update">
+</p>
+
+When the update finishes, PSC Store shows a short completion countdown before either restarting or shutting the console down.
+
+After the restart, or on the next launch if the console shut down, the success screen is shown so the result is obvious on-console.
+
+<p>
+  <img src="docs/screenshots/pscstore_app_update_complete_countdown.jpg" width="49%" alt="Update complete countdown">
+  <img src="docs/screenshots/pscstore_app_update_success.jpg" width="49%" alt="Update success">
+</p>
+
+If no update is available, PSC Store shows a simple up-to-date result instead of leaving the check ambiguous.
+
+<p>
+  <img src="docs/screenshots/pscstore_app_updates_up_to_date.jpg" width="49%" alt="Updates up to date">
+</p>
+
 ### Settings And Notices
 
 External Sources is opt-in. The Content Notice explains what PSC Store does, what it does not host, and what responsibility remains with the user. It is shown on first launch, and when External Sources is enabled it is shown before attempted downloads. Credits and References provides attribution for the projects, tools, libraries, fonts, and references PSC Store uses or builds alongside. Both are available in Settings under the About section.
@@ -454,4 +489,3 @@ The top-level [LICENSE.md](LICENSE.md) scopes this release repository's own mate
 - GNU Lesser General Public License: https://www.gnu.org/licenses/lgpl-2.1.html
 
 This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit. It also includes cryptographic software written by Eric Young and software written by Tim Hudson. 7-Zip is Copyright (C) Igor Pavlov and is distributed under the GNU LGPL, with additional BSD 3-clause and unRAR restriction notes in the 7-Zip source license. UPX is used with its compressed-executable exception. All third-party names, trademarks, and content remain the property of their respective owners.
-
