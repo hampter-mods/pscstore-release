@@ -400,13 +400,76 @@ pe_wifi_has_saved_networks()
 pe_wifi_state_is_busy()
 {
   # pe_wifi_state_is_busy <state>
-  # Do not kick supplicant while Project Eris is scanning or while association is in-flight.
+  # Do not kick supplicant while Project Eris is scanning, association is in-flight,
+  # or the UI has deliberately left all networks disabled.
   case "$1" in
-    SCANNING|ASSOCIATING|ASSOCIATED|4WAY_HANDSHAKE|GROUP_HANDSHAKE)
+    SCANNING|AUTHENTICATING|ASSOCIATING|ASSOCIATED|4WAY_HANDSHAKE|GROUP_HANDSHAKE|INACTIVE|INTERFACE_DISABLED)
       return 0
       ;;
   esac
   return 1
+}
+
+pe_wifi_auto_reconnect_paused()
+{
+  # pe_wifi_auto_reconnect_paused <ifname>
+  # A runtime-only pause gives Project Eris' setup UI an idle supplicant on which
+  # it can perform a manual scan. The saved wpa_supplicant config is not changed.
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+
+  pause_file="/tmp/pe_wifi_reconnect_pause.${ifname}.until"
+  [ -f "$pause_file" ] || return 1
+  pause_until="$(cat "$pause_file" 2>/dev/null)"
+  case "$pause_until" in
+    *[!0-9]*|"")
+      rm -f "$pause_file" 2>/dev/null || true
+      return 1
+      ;;
+  esac
+
+  pause_now="$(date -u +%s 2>/dev/null)"
+  case "$pause_now" in
+    *[!0-9]*|"") pause_now=0 ;;
+  esac
+  if [ "$pause_now" -ne 0 ] && [ "$pause_now" -lt "$pause_until" ]; then
+    return 0
+  fi
+
+  rm -f "$pause_file" 2>/dev/null || true
+  return 1
+}
+
+pe_wifi_pause_auto_reconnect()
+{
+  # pe_wifi_pause_auto_reconnect <ifname> [pause_seconds]
+  # Stop the current automatic scan/reconnect cycle without disabling or deleting
+  # any saved network. A manual SCAN/SELECT_NETWORK can still take over immediately.
+  ifname="$1"
+  pause_seconds="${2:-120}"
+  [ -n "$ifname" ] || return 1
+  case "$pause_seconds" in
+    *[!0-9]*|"") pause_seconds=120 ;;
+  esac
+  [ "$pause_seconds" -lt 30 ] 2>/dev/null && pause_seconds=30
+
+  pause_now="$(date -u +%s 2>/dev/null)"
+  case "$pause_now" in
+    *[!0-9]*|"") pause_now=0 ;;
+  esac
+  if [ "$pause_now" -ne 0 ]; then
+    echo $((pause_now + pause_seconds)) >"/tmp/pe_wifi_reconnect_pause.${ifname}.until" 2>/dev/null || true
+  fi
+
+  pe_log "wifi: ${ifname} saved network still unavailable; pausing auto-reconnect for ${pause_seconds}s"
+  # ABORT_SCAN is not available in every old wpa_cli build, so keep it best-effort.
+  pe_wpa_cli "$ifname" abort_scan || true
+  pe_wpa_cli "$ifname" disconnect || true
+  # Complete one bounded scan while automatic association is paused. This both
+  # refreshes the network list and emits the scan-results event awaited by the UI.
+  sleep 1
+  pe_wpa_cli "$ifname" scan || true
+  return 0
 }
 
 pe_wifi_is_connected()
@@ -428,11 +491,29 @@ pe_wifi_is_connected()
 pe_wifi_reconnect()
 {
   # pe_wifi_reconnect <ifname>
+  # Best-effort, non-destructive reconnect. Do not reload the config or enable all
+  # profiles here: those operations can race the WiFi setup UI and revive the old
+  # network while the user is selecting a replacement.
   ifname="$1"
-  # Best-effort: kick wpa_supplicant to (re)select saved networks.
+  [ -n "$ifname" ] || return 1
+  pe_wifi_auto_reconnect_paused "$ifname" && return 0
+
+  reconnect_state="$(pe_wpa_state "$ifname" 2>/dev/null)"
+  pe_wifi_state_is_busy "$reconnect_state" && return 0
+  pe_wpa_cli "$ifname" reconnect || pe_wpa_cli "$ifname" reassociate || true
+}
+
+pe_wifi_reload_and_reconnect()
+{
+  # pe_wifi_reload_and_reconnect <ifname>
+  # Full config reload is reserved for explicit hard recovery.
+  ifname="$1"
+  [ -n "$ifname" ] || return 1
+  rm -f "/tmp/pe_wifi_reconnect_pause.${ifname}.until" \
+        "/tmp/pe_wifi_unconnected.${ifname}.since" 2>/dev/null || true
   pe_wpa_cli "$ifname" reconfigure || true
   pe_wpa_cli "$ifname" enable_network all || true
-  pe_wpa_cli "$ifname" reassociate || pe_wpa_cli "$ifname" reconnect || true
+  pe_wpa_cli "$ifname" reconnect || pe_wpa_cli "$ifname" reassociate || true
 }
 
 pe_wifi_enforce_awake()
@@ -496,7 +577,7 @@ pe_wifi_hard_recover()
   if [ -n "$wpa_conf" ] && [ -f "$wpa_conf" ]; then
     pe_start_wpa_supplicant "$ifname" "$wpa_conf" || true
   fi
-  pe_wifi_reconnect "$ifname"
+  pe_wifi_reload_and_reconnect "$ifname"
   pe_restart_udhcpc "$ifname"
 }
 
@@ -595,24 +676,77 @@ pe_network_monitor_start()
       esac
       [ "$wifi_kick_interval" -lt 5 ] 2>/dev/null && wifi_kick_interval=5
 
+      # If an enabled saved network remains unavailable, periodically give the setup
+      # UI a quiet window in which its manual scan cannot be crowded out by automatic
+      # reassociation. Set PE_WIFI_SCAN_STUCK_AFTER=0 to disable this behavior.
+      wifi_scan_stuck_after="${PE_WIFI_SCAN_STUCK_AFTER:-60}"
+      case "$wifi_scan_stuck_after" in
+        *[!0-9]*|"") wifi_scan_stuck_after=60 ;;
+      esac
+      if [ "$wifi_scan_stuck_after" -ne 0 ] && [ "$wifi_scan_stuck_after" -lt 30 ] 2>/dev/null; then
+        wifi_scan_stuck_after=30
+      fi
+      wifi_manual_scan_window="${PE_WIFI_MANUAL_SCAN_WINDOW:-120}"
+      case "$wifi_manual_scan_window" in
+        *[!0-9]*|"") wifi_manual_scan_window=120 ;;
+      esac
+      [ "$wifi_manual_scan_window" -lt 30 ] 2>/dev/null && wifi_manual_scan_window=30
+
       if [ "$now_epoch" -eq 0 ] || [ $((now_epoch - last_wifi_kick_epoch)) -ge "$wifi_kick_interval" ]; then
         for wif in $(printf "%s\n" "$ifaces" | grep -E '^(wlan|wl)'); do
           pe_wifi_enforce_awake "$wif" || true
           if pe_wifi_is_connected "$wif"; then
-            rm -f "/tmp/pe_wifi_disc_fail.${wif}" 2>/dev/null || true
+            rm -f "/tmp/pe_wifi_disc_fail.${wif}" \
+                  "/tmp/pe_wifi_unconnected.${wif}.since" \
+                  "/tmp/pe_wifi_reconnect_pause.${wif}.until" 2>/dev/null || true
             # Keep DHCP lease maintenance alive during long idle periods.
             if ip -4 addr show dev "$wif" 2>/dev/null | grep -q "inet " || ip addr show dev "$wif" 2>/dev/null | grep -q "inet "; then
               pe_start_udhcpc "$wif"
             fi
           else
             wpa_state="$(pe_wpa_state "$wif" 2>/dev/null)"
-            if pe_wifi_state_is_busy "$wpa_state"; then
-              pe_log "wifi: ${wif} state=${wpa_state}; leaving Project Eris scan/connect flow alone"
+            if ! pe_wifi_has_saved_networks "$wif" "$wpa_conf"; then
+              rm -f "/tmp/pe_wifi_disc_fail.${wif}" \
+                    "/tmp/pe_wifi_unconnected.${wif}.since" \
+                    "/tmp/pe_wifi_reconnect_pause.${wif}.until" 2>/dev/null || true
+              pe_log "wifi: ${wif} has no saved networks; not auto-reconnecting during setup"
               continue
             fi
-            if ! pe_wifi_has_saved_networks "$wif" "$wpa_conf"; then
-              rm -f "/tmp/pe_wifi_disc_fail.${wif}" 2>/dev/null || true
-              pe_log "wifi: ${wif} has no saved networks; not auto-reconnecting during setup"
+
+            if pe_wifi_auto_reconnect_paused "$wif"; then
+              pe_log "wifi: ${wif} auto-reconnect paused; leaving manual scan/select flow alone"
+              continue
+            fi
+
+            unconnected_file="/tmp/pe_wifi_unconnected.${wif}.since"
+            unconnected_since="$(cat "$unconnected_file" 2>/dev/null)"
+            case "$unconnected_since" in
+              *[!0-9]*|"")
+                unconnected_since="$now_epoch"
+                echo "$unconnected_since" >"$unconnected_file" 2>/dev/null || true
+                ;;
+            esac
+            unconnected_for=0
+            if [ "$now_epoch" -ne 0 ] && [ "$unconnected_since" -ne 0 ]; then
+              unconnected_for=$((now_epoch - unconnected_since))
+              [ "$unconnected_for" -lt 0 ] 2>/dev/null && unconnected_for=0
+            fi
+
+            if [ "$wifi_scan_stuck_after" -ne 0 ] && \
+               [ "$unconnected_for" -ge "$wifi_scan_stuck_after" ] 2>/dev/null; then
+              case "$wpa_state" in
+                SCANNING|DISCONNECTED)
+                  pe_wifi_pause_auto_reconnect "$wif" "$wifi_manual_scan_window"
+                  # Begin a fresh availability window after the pause. Keep the
+                  # failure counter so opt-in hard recovery still works eventually.
+                  rm -f "$unconnected_file" 2>/dev/null || true
+                  continue
+                  ;;
+              esac
+            fi
+
+            if pe_wifi_state_is_busy "$wpa_state"; then
+              pe_log "wifi: ${wif} state=${wpa_state}; leaving Project Eris scan/connect flow alone"
               continue
             fi
             pe_wifi_reconnect "$wif"

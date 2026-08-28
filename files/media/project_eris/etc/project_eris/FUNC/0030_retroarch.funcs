@@ -29,9 +29,8 @@ PSC_HISTORY_DB="/media/project_eris/etc/project_eris/SUP/launchers/pscstore/hist
 PSC_HISTORY_LOGGER="${PSC_UI_TEST_LAUNCHER_DIR}/pscstore_logger"
 PSC_TIME_SYNC_FLAG="${PSC_UI_TEST_LAUNCHER_DIR}/time_sync_failed.flag"
 # PSCSTORE_HISTORY_LOGGING_BLOCK_BEGIN
-PSCSTORE_LOG_DIR="${PSCSTORE_LOG_DIR:-/tmp/pscstore_logs}"
-PSC_HISTORY_HOOK_LOG="${PSCSTORE_LOG_DIR}/history_hook.log"
-mkdir -p "${PSCSTORE_LOG_DIR}" 2>/dev/null || true
+# Release channel: disable history hook logging.
+PSC_HISTORY_HOOK_LOG="/dev/null"
 # PSCSTORE_HISTORY_LOGGING_BLOCK_END
 PSC_SESSION_META="/tmp/psc_history_session.meta"
 PSC_RA_CONTENT_HISTORY="/media/project_eris/opt/retroarch/config/retroarch/content_history.lpl"

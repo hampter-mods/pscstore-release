@@ -422,8 +422,9 @@ The top-level [LICENSE.md](LICENSE.md) scopes this release repository's own mate
 - Let's Encrypt certificates: https://letsencrypt.org/certificates/
   - Helper certificates are included for PSC TLS bundle support.
 
-- 7-Zip / 7zr 23.01: https://www.7-zip.org/
-  - Used for archive extraction in install/download workflows.
+- 7-Zip 23.01: https://www.7-zip.org/
+  - `psc_7za_static` is the full standalone `7zz` extractor, supporting ZIP, RAR, and RAR5 archives.
+  - The smaller `7zr` binary is retained as a fallback.
 
 - UPX: https://upx.github.io/
   - The bundled RetroArch binary is UPX-packed and includes the UPX decompressor stub under the UPX compressed-executable exception.

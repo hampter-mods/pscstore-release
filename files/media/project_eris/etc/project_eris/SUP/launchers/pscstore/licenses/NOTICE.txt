@@ -9,7 +9,7 @@ Bundled or distributed components include:
 - RetroArch 1.8.8 patched build
 - PCSX-ReARMed disc-project core
 - Alex Free libcrypt-patcher / lcp
-- 7-Zip / 7zr 23.01
+- 7-Zip 23.01: full psc_7za_static (7zz) extractor, with 7zr retained as fallback
 - curl / libcurl 8.5.0
 - OpenSSL 1.1.1u
 - zlib compression support
