@@ -347,7 +347,7 @@ If the automatic update channel is unavailable, PSC Store can still be updated m
 2. Copy `pscstore-uninstall-vX.X.X.mod` to your Project Eris USB inside `/project_eris/mods/`.
 3. Boot the PS Classic and let Project Eris uninstall the mod.
 
-The uninstall package removes PSC Store itself. It does not delete your installed games, your save backups in the `/saves` folder at the root of the Project Eris USB, or your `/ps1_external_sources.tsv` file.
+Uninstalling PSC Store does not remove your installed games.
 
 ---
 
