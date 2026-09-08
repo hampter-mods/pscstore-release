@@ -34,6 +34,8 @@ Cover-art notes:
   - Loonies 8192: https://thp.itch.io/loonies-8192
 - Zhamul:
   - Sauna: https://zhamul.itch.io/sauna
+  - Where in the pils is Fitzgerald?:
+    https://zhamul.itch.io/where-in-the-pils-is-fitzgerald-ps1
 - rubixcube6:
   - Snake: https://masonbarrygames.com/snake
 - Logan Campbell:
@@ -52,6 +54,20 @@ Cover-art notes:
     https://tragicomedy-hellin.blogspot.com/2026/01/flappy-adventure-3-nuevo-juego-para-ps1.html
 - NITROYUASH:
   - PETSCOP: Restored: https://nitroyuash.itch.io/petscop-restored
+- Bonnie Games:
+  - Celeste Classic PS1 Collection:
+    https://bonnie-studios.itch.io/celeste-classic-collection-psx
+- KasaBranca:
+  - Penguins!: https://achrostel.itch.io/penguins-ss25
+  - Tiny Backrooms: https://github.com/KasaBranca/TinyBackrooms/releases
+- fgsfdsfgs:
+  - QuakePSX: https://github.com/fgsfdsfgs/quakepsx/releases/tag/latest-shareware
+- Bonnie Studios:
+  - QuakePSX: https://bonnie-studios.itch.io/quake-psx
+- Elias Daler:
+  - Yume Nikki: https://eliasdaler.itch.io/yume-nikki-ps1
+- Jimmy Breck-McKye:
+  - Nortis: https://github.com/jbreckmckye/nortis/releases
 
 All third-party names, trademarks, project materials, and cover art remain the
 property of their respective owners. Mention here does not imply endorsement or
