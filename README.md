@@ -23,21 +23,19 @@ External Sources is disabled by default. PSC Store can still be used for local l
 
 ## Content Notice
 
-PSC Store is a library management tool for Project Eris. Optional physical-disc and user-provided source workflows help manage content you supply yourself.
+PSC Store is a library management tool for Project Eris. Optional download-link, archive-upload, and physical-disc workflows let you manage content you supply yourself.
 
 Game database details and cover art are read from the metadata already provided by the preexisting Project Eris setup. PSC Store's bundled database is a lightly adjusted version of that same database, changed only to add the PS1 Game Disc entry and Homebrew entries, and tighten genre metadata. PSC Store also adds homebrew cover art from community user-driven/generated sources where available. See Credits and References for attribution and cover-art notes.
 
-PSC Store does not host, bundle, mirror, store, or include copyrighted games, BIOS files, ROMs, or disc images.
-
-PSC Store does not include external source links by default.
-
-PSC Store does not provide, recommend, host, scrape, or maintain game download sources.
+PSC Store does not provide or maintain game download sources. No external game-download links are included by default.
 
 When External Sources is enabled, PSC Store creates a blank source TSV file in the root of your Project Eris USB:
 
 `/ps1_external_sources.tsv`
 
-You can add or update your own lawful source entries directly in that file or through PSC Store External Source Management when attempting a download. External Source Management temporarily opens a paired webpage on your local network while it is active and saves the links you provide to the same TSV file. It does not host or relay game files.
+You can add or update your own lawful source entries directly in that file or through PSC Store External Source Management when attempting a download.
+
+External Source Management opens a temporary, paired webpage on your local network. You can provide direct download links or select game archives from your device. Links are saved to `/ps1_external_sources.tsv`. Uploaded archives transfer directly from your browser to your PS Classic for local processing and installation, without adding or changing source TSV entries.
 
 PSC Store will only request external downloads from entries you provide.
 
@@ -49,9 +47,9 @@ Physical-disc import and PS1 Game Disc features are intended only for your own o
 
 PSC Store is not affiliated with, endorsed by, or sponsored by Sony Interactive Entertainment, Project Eris, or ModMyClassic. All names, trademarks, and content remain the property of their respective owners.
 
-You are responsible for making sure any content you download, import from disc, replace, or play is legally permitted for you to use in your region.
+You are responsible for ensuring that any content you download, upload, import, install, replace, or play is legally permitted for you to use in your region.
 
-External Sources is disabled by default. By enabling it or continuing, you accept responsibility for your content choices.
+External Sources is optional and disabled by default. It uses only the source entries or archive files you explicitly supply after enabling it.
 
 ---
 
@@ -145,20 +143,27 @@ When a job finishes, PSC Store shows a clear completion screen instead of leavin
 
 ### External Source Management
 
-External Sources is opt-in. When enabled, PSC Store can open External Source Management for the selected game when you need to add or update your own source entries.
+External Sources is opt-in. External Source Management lets you edit download links or upload game archives from another device on your local network.
 
 <p>
   <img src="docs/screenshots/pscstore_app_source_assistant.jpg" width="49%" alt="External Source Management in PSC Store">
 </p>
 
-The in-app screen shows the local address, QR code, and pairing code while the session is active. External Source Management temporarily opens a paired webpage on your local network while it is active.
+Open the address or scan the QR code shown on the console, then pair your browser to manage the selected game's sources.
 
 <p>
   <img src="docs/screenshots/webserver_external_source_management_pair_page.PNG" width="49%" alt="External Source Management pair page">
-  <img src="docs/screenshots/webserver_external_source_management_selected_game_page.PNG" width="49%" alt="External Source Management selected game page">
+  <img src="docs/screenshots/webserver_external_source_management_selected_game_page.PNG" width="49%" alt="External Source Management selected game with direct download links">
 </p>
 
-After pairing, you can add or update your own lawful source entries for the selected game. It saves the links you provide to `/ps1_external_sources.tsv`, does not host or relay game files, and PSC Store will only request external downloads from entries you provide.
+The **Direct download links** tab saves per-disc URLs to `/ps1_external_sources.tsv`, with optional sizes and boot aliases. The **File upload** tab accepts ZIP, 7z or RAR archives containing BIN/CUE disc sets, including combined archives for multi-disc games.
+
+<p>
+  <img src="docs/screenshots/webserver_external_source_management_selected_game_page_upload.PNG" width="49%" alt="External Source Management selected game with archive file inputs">
+  <img src="docs/screenshots/webserver_external_source_management_upload_queue.PNG" width="49%" alt="External Source Management upload queue with game covers, progress and upload controls">
+</p>
+
+Select your archives, click **Queue upload**, then continue on the console to choose an install location. The **Upload queue** shows game covers, progress and transfer speed, with retry, archive reselection and cancellation controls. Keep the browser tab open while files transfer; uploads follow the console's Download Queue order.
 
 ### Saves And Backups
 
@@ -305,7 +310,7 @@ PSC Store creates the source file at the root of the Project Eris USB:
 
 You can add or update your own lawful source entries directly in that file or through PSC Store External Source Management when attempting a download.
 
-External Source Management temporarily opens a paired webpage on your local network while it is active and saves the links you provide to the same TSV file. It does not host or relay game files.
+External Source Management opens a paired webpage on your local network. Direct download links are saved to the same TSV file. The archive upload option transfers your selected files directly to the console without adding or changing TSV rows.
 
 PSC Store will only request external downloads from entries you provide. Follow the notes inside the generated TSV template, or follow the in-app External Source Management prompts.
 
@@ -355,7 +360,7 @@ Uninstalling PSC Store does not remove your installed games.
 
 - Project Eris is required.
 - Networking is optional for local features, but required for external sources, app update checks, and reliable playtime/time sync.
-- External Sources is opt-in, disabled by default, and does nothing unless you enable it and add your own lawful source entries to the blank TSV file PSC Store generates.
+- External Sources is opt-in, disabled by default, and uses only the source entries or archive files you explicitly supply after enabling it.
 - Keep Project Eris SSH access on trusted local networks only. Do not expose the console's SSH service to public or untrusted networks.
 - PSC Store modifies Project Eris/PS Classic files; use at your own risk.
 - Keep backups of important saves before changing storage layouts or uninstalling entries.
