@@ -159,8 +159,8 @@ Open the address or scan the QR code shown on the console, then pair your browse
 The **Direct download links** tab saves per-disc URLs to `/ps1_external_sources.tsv`, with optional sizes and boot aliases. The **File upload** tab accepts ZIP, 7z or RAR archives containing BIN/CUE disc sets, including combined archives for multi-disc games.
 
 <p>
-  <img src="docs/screenshots/webserver_external_source_management_selected_game_page_upload.PNG" width="49%" alt="External Source Management selected game with archive file inputs">
-  <img src="docs/screenshots/webserver_external_source_management_upload_queue.PNG" width="49%" alt="External Source Management upload queue with game covers, progress and upload controls">
+  <img src="docs/screenshots/webserver_external_source_management_selected_game_page_upload.png" width="49%" alt="External Source Management selected game with archive file inputs">
+  <img src="docs/screenshots/webserver_external_source_management_upload_queue.png" width="49%" alt="External Source Management upload queue with game covers, progress and upload controls">
 </p>
 
 Select your archives, click **Queue upload**, then continue on the console to choose an install location. The **Upload queue** shows game covers, progress and transfer speed, with retry, archive reselection and cancellation controls. Keep the browser tab open while files transfer; uploads follow the console's Download Queue order.
